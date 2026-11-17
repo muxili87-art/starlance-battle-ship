@@ -31,7 +31,17 @@ export function stepAutopilot(session, dtMs, loop = null, { reactionMs = 180 } =
     loop.triggerActiveFormSkill([]);
   }
 
-  // 1. Dodge nearby incoming enemy bullets first!
+  // 1. Dodge Boss laser lane telegraphs first!
+  const warnSectors = new Set((session.bossWarnings || []).map((w) => w.sector));
+  if (warnSectors.has(session.ship.sector)) {
+    const safeSector = [1, 0, 2].find((sec) => !warnSectors.has(sec));
+    if (safeSector !== undefined) {
+      session.setShipTargetX(140 + safeSector * 220);
+      return;
+    }
+  }
+
+  // 2. Dodge nearby incoming enemy bullets!
   const dangerBullet = (session.enemyBullets || []).find(
     (b) => b.y > session.ship.y - 220 && b.y < session.ship.y + 20 && Math.abs(b.x - session.ship.x) < 56
   );
@@ -42,11 +52,13 @@ export function stepAutopilot(session, dtMs, loop = null, { reactionMs = 180 } =
     return;
   }
 
-  // 2. Actively move to intercept the lowest (most threatening) enemy!
+  // 3. Actively move to intercept the lowest enemy or track Boss!
   if (session.enemies.length > 0) {
     const sorted = [...session.enemies].sort((a, b) => b.y - a.y);
     const target = sorted[0];
     session.setShipTargetX(target.x);
+  } else if (session.boss) {
+    session.setShipTargetX(session.boss.x);
   }
 }
 

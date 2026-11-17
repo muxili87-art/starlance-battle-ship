@@ -38,6 +38,10 @@ export class VfxRenderer {
         }
       } else if (ev.type === "reaction" || ev.type === "pod-install") {
         this.bursts.push({ x: ev.x, y: ev.y + 18, size: 76, color: ev.color, lifeMs: 300, maxLifeMs: 300 });
+        if (this.popups.length >= 8) {
+          const oldest = this.popups.shift();
+          oldest?.text?.destroy();
+        }
         const text = this.scene.add
           .text(Math.round(ev.x), Math.round(ev.y), ev.label, {
             fontSize: "17px",
@@ -135,6 +139,11 @@ export class VfxRenderer {
         }
       }
     }
+    // Hard caps to prevent late-wave particle/text spikes from stalling frame rate
+    if (this.bursts.length > 60) this.bursts.splice(0, this.bursts.length - 60);
+    if (this.debris.length > 120) this.debris.splice(0, this.debris.length - 120);
+    if (this.smoke.length > 40) this.smoke.splice(0, this.smoke.length - 40);
+    if (this.chains.length > 32) this.chains.splice(0, this.chains.length - 32);
   }
 
   render(session, dtMs) {

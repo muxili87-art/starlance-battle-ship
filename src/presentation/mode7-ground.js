@@ -22,6 +22,8 @@ export class Mode7Ground {
       .image(360, 760, "mode7-ground")
       .setDisplaySize(720, 1040)
       .setDepth(1);
+    this.imgData = this.tex.getContext().createImageData(this.w, this.h);
+    this.renderAccumMs = 34;
   }
 
   render(session, dtMs) {
@@ -30,6 +32,11 @@ export class Mode7Ground {
     const overloadBoost = session.core.overloadActive ? 2.8 : 1.0;
     const dashBoost = (session.warpDashMs || 0) > 0 ? 3.8 : 1.0;
     this.scrollZ += dtSec * 4.8 * speedFactor * overloadBoost * dashBoost;
+
+    // Throttle software pixel-buffer upload to ~30fps to prevent GPU/CPU stalls on long runs
+    this.renderAccumMs += dtMs;
+    if (this.renderAccumMs < 32) return;
+    this.renderAccumMs = 0;
 
     const ctx = this.tex.getContext();
     const w = this.w;
@@ -49,7 +56,7 @@ export class Mode7Ground {
             ? [176, 124, 255]
             : [67, 207, 244];
 
-    const imgData = ctx.createImageData(w, h);
+    const imgData = this.imgData;
     const data = imgData.data;
 
     // Deep-space cosmic void with diagonal pixel-dithered nebula ribbon (no giant flat circles!)

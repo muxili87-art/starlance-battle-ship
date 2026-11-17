@@ -49,6 +49,9 @@ export class CombatLoop {
     this.#stepEnemiesPhysics(dtSec, events);
     this.#stepSupplyPods(dtSec, events);
 
+    if (s.projectiles.length > 160) s.projectiles.splice(0, s.projectiles.length - 160);
+    if ((s.enemyBullets?.length || 0) > 120) s.enemyBullets.splice(0, s.enemyBullets.length - 120);
+
     return events;
   }
 
