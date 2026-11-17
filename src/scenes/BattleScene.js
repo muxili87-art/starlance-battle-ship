@@ -41,6 +41,19 @@ export class BattleScene extends Phaser.Scene {
       },
       onSwitchForm: (formId) => this.#switchForm(formId),
       onCastSkill: () => this.#castActiveSkill(),
+      onScrapAction: () => {
+        if (this.room.isSpectating()) return;
+        const local = this.room.getLocalSlot();
+        const events = [];
+        if (local?.loop.spendScrapForOverclock(events)) {
+          this.vfxRenderer.consumeEvents(events);
+          for (const ev of events) {
+            if (ev.type === "pod-install") this.actorRenderer.triggerUpgradeInstall(ev.color, ev.label);
+          }
+        } else if (local?.loop.spendScrapForRepair(events)) {
+          this.vfxRenderer.consumeEvents(events);
+        }
+      },
     });
 
     this.#bindInput();

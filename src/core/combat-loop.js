@@ -37,7 +37,7 @@ export class CombatLoop {
 
     this.#stepCooldowns(dtMs);
     this.#stepActiveSkillBuff(dtMs, events);
-    this.#stepEconomy(dtMs);
+    this.#stepEconomy(dtMs, events);
     this.#stepShip(dtSec);
     this.#stepOverload(dtMs, events);
     this.#stepNebulaZones(dtSec, events);
@@ -52,12 +52,17 @@ export class CombatLoop {
     return events;
   }
 
-  #stepEconomy(dtMs) {
-    const eco = this.session.economy;
+  #stepEconomy(dtMs, events = []) {
+    const s = this.session;
+    const eco = s.economy;
     if (!eco) return;
     if (eco.comboTimerMs > 0) {
       eco.comboTimerMs = Math.max(0, eco.comboTimerMs - dtMs);
       if (eco.comboTimerMs === 0) eco.combo = 0;
+    }
+    // Auto-Repair when Core HP drops to <= 75% and player has enough Scrap (mobile-friendly!)
+    if (s.core.hp > 0 && s.core.hp <= s.core.maxHp * 0.75 && eco.scrap >= this.nextRepairCost()) {
+      this.spendScrapForRepair(events, true);
     }
   }
 
@@ -69,14 +74,15 @@ export class CombatLoop {
     return 80 + (this.session.economy?.overclockCount || 0) * 65;
   }
 
-  spendScrapForRepair(events = []) {
+  spendScrapForRepair(events = [], isAuto = false) {
     const s = this.session;
     const cost = this.nextRepairCost();
     if (!s.economy || s.economy.scrap < cost || s.core.hp >= s.core.maxHp) return false;
     s.economy.scrap -= cost;
     s.economy.repairCount += 1;
     s.core.hp = Math.min(s.core.maxHp, s.core.hp + 20);
-    events.push({ type: "reaction", x: s.ship.x, y: s.ship.y - 36, label: `星屑维修 -${cost} · +20% 耐久`, color: 0x58e69a });
+    const prefix = isAuto ? "自动星屑维修" : "星屑维修";
+    events.push({ type: "reaction", x: s.ship.x, y: s.ship.y - 36, label: `${prefix} -${cost} · +20% 耐久`, color: 0x58e69a });
     return true;
   }
 

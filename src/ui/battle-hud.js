@@ -9,7 +9,7 @@ import { ensurePixelIcon, ensurePixelPanel } from "../presentation/pixel-ui.js";
  * - Zero flat vector boxes
  */
 export class BattleHud {
-  constructor(scene, { onPauseClick, onOverloadClick, onSelectWatch, onReturnLocal, onLeaveMatch, onSwitchForm, onCastSkill }) {
+  constructor(scene, { onPauseClick, onOverloadClick, onSelectWatch, onReturnLocal, onLeaveMatch, onSwitchForm, onCastSkill, onScrapAction }) {
     this.scene = scene;
     this.onSelectWatch = onSelectWatch;
 
@@ -184,7 +184,9 @@ export class BattleHud {
     this.coreText = scene.add
       .text(360, 1152, "耐久 100%  ·  能源 0%  ·  改装 0件", { fontSize: "14px", color: "#cfe0f2", fontStyle: "bold" })
       .setOrigin(0.5, 0.5)
-      .setDepth(50);
+      .setDepth(50)
+      .setInteractive({ useHandCursor: true })
+      .on("pointerdown", () => onScrapAction?.());
 
     this.overloadHint = scene.add
       .text(360, 1024, "★ 能源满载：点击核心或按 [F] 第一视角俯冲过载 ★", { fontSize: "14px", color: "#ff8c3a", fontStyle: "bold" })
@@ -336,7 +338,12 @@ export class BattleHud {
     const ocCost = 80 + (session.economy?.overclockCount || 0) * 65;
     const comboTag = combo >= 2 ? ` · x${combo}连击` : "";
     const nebulaTag = session.inIonNebula ? " · ⚡星云×1.8" : "";
-    const spendHint = scrap >= ocCost ? ` [Q]超频(${ocCost})` : scrap >= repairCost && hpPct < 100 ? ` [E]修(${repairCost})` : "";
+    const spendHint =
+      scrap >= ocCost
+        ? ` [点击/Q超频(${ocCost})]`
+        : hpPct < 100 && scrap >= repairCost
+          ? ` [自动修(${repairCost})]`
+          : "";
     if (session.core.overloadActive) {
       const rem = (session.core.overloadRemainingMs / 1000).toFixed(1);
       this.coreText.setText(`⚡ 第一视角过载突击中 ${rem}s · 星屑 ${scrap}${comboTag}`).setColor("#ff8c3a");
