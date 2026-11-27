@@ -36,13 +36,13 @@ export class MenuScene extends Phaser.Scene {
       <section class="solo-menu" aria-label="选择出击战机">
         <header class="solo-brand">
           <div class="solo-brand-top">
-            <span class="solo-wordmark">STARLANCE // 32-BIT ARCADE</span>
+            <span class="solo-wordmark">SECTOR NINE // V1.0</span>
             <div class="solo-brand-actions">
               <button class="solo-medals-btn" type="button">${getActionIconSvg("trophy")}<span>勋章 ${unlockedCount}/${ACHIEVEMENTS.length}</span></button>
               <button class="solo-sound solo-menu-sound" type="button"></button>
             </div>
           </div>
-          <h1>星穹矢刃</h1>
+          <h1>第九空域</h1>
           <div class="solo-mode-bar" role="group" aria-label="模式与难度">
             <div class="solo-seg">
               <button type="button" data-mode="campaign" aria-pressed="${initialMode === "campaign"}">常规战役</button>

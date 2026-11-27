@@ -1,0 +1,3299 @@
+第九空域游戏软件 V1.0                                      第 1 页 / 共 60 页
+==============================================================================
+import Phaser from "phaser";
+import { BootScene } from "./scenes/BootScene.js";
+import { MenuScene } from "./scenes/MenuScene.js";
+import { BattleScene } from "./scenes/BattleScene.js";
+import "./ui/styles.css";
+const config = {
+  type: Phaser.AUTO,
+  parent: "game",
+  width: 720,
+  height: 1280,
+  backgroundColor: "#0d1024",
+  pixelArt: true,
+  antialias: false,
+  roundPixels: true,
+  render: { pixelArt: true, antialias: false, roundPixels: true, powerPreference: "high-performance" },
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    width: 720,
+    height: 1280,
+  },
+  scene: [BootScene, MenuScene, BattleScene],
+};
+window.__BATTLE_SHIP_GAME__ = new Phaser.Game(config);
+import { checkAchievements } from "../state/achievements.js";
+import { FIELD, GRAZE_RADIUS, HIT_RADIUS, PICKUP_RADIUS } from "../state/solo-session.js";
+import { CAMPAIGN, createBossParts, DISPLAY_TARGETS, ENEMY_PROFILES, StageDirector } from "./stage-director.js";
+import { SoloWeapons } from "./solo-weapons.js";
+import { CONTRACT, MODULE } from "./upgrade-cards.js";
+const CRIMSON = 0xff3355;
+const GOLD = 0xffd13b;
+const WHITE = 0xffffff;
+const BOSS_PATTERNS = {
+  boss_marshal: [["aimed", "spiral"], ["laser", "spiral", "aimed"], ["blades", "aimed", "spiral"]],
+  boss_citadel: [["missiles", "fans"], ["missiles", "fans"], ["corridor"]],
+  boss_overmind: [["spiral"], ["gravity", "bombers", "aimed"], ["laser", "laser", "spiral"]],
+};
+const SECTOR_ENEMY_HP = [1, 1.85, 3.10];
+const PHASE_GATES = [0.65, 0.30];
+const CORE_EXPOSURE = { boss_marshal: 1.37, boss_citadel: 2.25, boss_overmind: 2.55 };
+const FAN = [-0.44, -0.22, 0, 0.22, 0.44];
+function distanceSquared(a, b) {
+  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+}
+function touches(a, b, radius) {
+  return distanceSquared(a, b) <= radius * radius;
+}
+function pointToSegmentDistance(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+
+第九空域游戏软件 V1.0                                      第 2 页 / 共 60 页
+==============================================================================
+  return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
+}
+export class SoloCombat {
+  constructor(session, manifest, random = Math.random) {
+    this.session = session;
+    this.catalog = new Map([...manifest.enemies, ...manifest.bosses].map((entry) => [entry.id, entry]));
+    this.random = random;
+    this.enemies = [];
+    this.shots = [];
+    this.enemyShots = [];
+    this.pickups = [];
+    this.events = [];
+    this.boss = null;
+    this.director = new StageDirector(random);
+    this.weapons = new SoloWeapons(this);
+    this.nextGuardMs = 0;
+    this.transitionPending = false;
+  }
+  get bossShielded() {
+    return Boolean(this.boss && (this.boss.age < 3.25 || this.boss.shieldUntil > this.session.elapsedMs));
+  }
+  bossTargets(includeDestroyed = false) {
+    if (!this.boss) return [];
+    return this.boss.parts.filter((part) => includeDestroyed || part.hp > 0)
+      .map((part) => ({ x: this.boss.x + part.dx, y: this.boss.y + part.dy, part }));
+  }
+  advance(dtMs, steer) {
+    const s = this.session;
+    if (s.evolution) {
+      this.#cancelToGold();
+      this.events.push({ type: "evolution", label: s.evolution, color: s.fighter.color, x: s.ship.x, y: s.ship.y });
+      s.evolution = null;
+      this.#pollAchievements();
+    }
+    if (this.transitionPending) this.#beginStageTransition();
+    let remaining = Math.min(dtMs, 50);
+    while (remaining > 0.001 && this.session.phase === "playing") {
+      const step = Math.min(remaining, 1000 / 60);
+      this.#step(step, steer);
+      if (this.transitionPending) this.#beginStageTransition();
+      remaining -= step;
+    }
+  }
+  #step(ms, steer) {
+    const s = this.session;
+    const dt = ms / 1000;
+    const previousTime = s.elapsedMs;
+    s.elapsedMs += ms;
+    if (s.feverUntil > previousTime) {
+      s.comboUntil += Math.min(ms, s.feverUntil - previousTime);
+      if (s.elapsedMs >= s.feverUntil) this.events.push({ type: "fever", active: false });
+    }
+
+第九空域游戏软件 V1.0                                      第 3 页 / 共 60 页
+==============================================================================
+    s.invulnerableMs = Math.max(0, s.invulnerableMs - ms);
+    s.overloadMs = Math.max(0, s.overloadMs - ms);
+    s.warpDashMs = Math.max(0, s.warpDashMs - ms);
+    if (s.comboUntil < s.elapsedMs) s.combo = 0;
+    if (s.fighter.weapon === "guard" && !s.guard && s.elapsedMs >= this.nextGuardMs) {
+      s.guard = true;
+      this.events.push({ type: "guard", x: s.ship.x, y: s.ship.y, color: 0xd3edff });
+    }
+    steer?.(ms);
+    s.move(ms);
+    if (s.emergencyPending && s.invulnerableMs === 0) this.#emergencyPulse();
+    if (s.transitionUntil) {
+      this.#movePickups(dt);
+      if (s.elapsedMs + 0.001 >= s.transitionUntil) {
+        s.transitionUntil = 0;
+        s.warpDashMs = 0;
+        s.stageStartedAt = s.elapsedMs;
+        s.offerUpgrade();
+        this.events.push({ type: "level" });
+      }
+      return;
+    }
+    s.charge(dt * 1.15);
+    if (!this.boss) {
+      const activeNonBoss = this.enemies.filter(({ hp, summoned }) => hp > 0 && !summoned).length;
+      const fieldClear = activeNonBoss === 0;
+      this.boss = this.director.update(s, (...args) => this.#spawn(...args), this.events, fieldClear, this.enemies.length);
+      if (this.boss) {
+        this.enemies = [this.boss];
+        this.#clearEnemyShots();
+      }
+    }
+    this.#moveEnemies(dt);
+    if (s.phase !== "playing" || this.transitionPending) return;
+    this.weapons.update(dt);
+    if (s.phase !== "playing" || this.transitionPending) return;
+    this.#movePlayerShots(dt);
+    this.enemies = this.enemies.filter((enemy) => enemy.hp > 0);
+    if (s.phase !== "playing" || this.transitionPending) return;
+    if (s.settleUpgrades()) {
+      this.events.push({ type: "level" });
+      return;
+    }
+    this.#moveEnemyShots(dt);
+    if (s.phase === "playing") this.#movePickups(dt);
+  }
+  #beginStageTransition() {
+    this.transitionPending = false;
+    this.session.beginStageTransition();
+    this.boss = null;
+    this.enemies.length = 0;
+    this.shots.length = 0;
+
+第九空域游戏软件 V1.0                                      第 4 页 / 共 60 页
+==============================================================================
+    this.pickups = this.pickups.filter(({ deliver }) => deliver);
+    this.#clearEnemyShots();
+    this.weapons.clearStageEffects();
+    this.events.push({ type: "warp", stage: this.session.stage });
+    if (this.session.mutator) this.events.push({ type: "mutator", ...this.session.mutator });
+    this.#pollAchievements();
+  }
+  #spawn(id, x, y, { side = 0, formation, flagship = false, summoned = false, bounty = false, opening = false, ace = null } = {}) {
+    const entry = this.catalog.get(id);
+    const { category } = entry;
+    const profile = ENEMY_PROFILES[id];
+    const span = category === "boss" ? entry.width : entry.height;
+    const s = this.session;
+    const boss = category === "boss";
+    const loop = s.loop - 1;
+    const extraLv = Math.max(0, s.level - ((s.stage - 1) * 3 + 3));
+    const waveScale = 1 + (Math.max(1, s.wave) - 1) * 0.10;
+    const catchUpHp = 1 + Math.min(0.60, extraLv * 0.12);
+    const stageScale = boss ? 1 + loop * 0.45 :
+      SECTOR_ENEMY_HP[s.sector - 1] * (1 + loop * 0.55) * waveScale * catchUpHp;
+    const hpScale = stageScale * (s.hardcore ? 1.30 : 1);
+    const hp = Math.round(profile.hp * hpScale * (flagship ? 2.4 : summoned ? 0.75 : 1));
+    const nextFire = boss ? 3.62 : s.enemyCadence * (category === "normal"
+      ? 0.65 + this.random() * 0.55 : 0.45 + this.random() * 0.40);
+    const enemy = {
+      ...profile, id, category, x, y, age: 0, turn: 0, hp, maxHp: hp,
+      scale: DISPLAY_TARGETS[category] / span * (flagship ? 1.22 : summoned ? 0.82 : 1),
+      direction: formation === "cross" ? -side : side, formation, flagship, summoned, opening, ace,
+      nextFire, flashUntil: 0, drift: 0,
+      bulletCatchUp: boss ? 1 : 1 + Math.min(0.20, extraLv * 0.04),
+    };
+    if (ace === "sniper") enemy.interval *= 0.78;
+    if (ace) this.events.push({ type: "ace-spawn", ace, x, y });
+    if (bounty) enemy.bountyUntil = s.elapsedMs + 8000;
+    if (flagship) {
+      enemy.interval *= 0.65;
+      enemy.speed *= 0.9;
+      enemy.radius *= 1.15;
+    }
+    if (summoned) enemy.speed *= 1.25;
+    if (category === "boss") {
+      s.bossDamaged = false;
+      enemy.parts = createBossParts(entry, enemy.scale, enemy.hp, hpScale);
+      enemy.hitWidth = Math.max(...enemy.parts.map((part) => Math.abs(part.dx) + part.radius));
+      enemy.hitHeight = Math.max(...enemy.parts.map((part) => Math.abs(part.dy) + part.radius));
+      enemy.phase = 1;
+      enemy.patternIndex = 0;
+      enemy.spiralAngle = 0;
+      enemy.beamLane = -1;
+      enemy.corridorSide = -1;
+      enemy.rings = null;
+      enemy.laser = null;
+
+第九空域游戏软件 V1.0                                      第 5 页 / 共 60 页
+==============================================================================
+      enemy.sway = 0;
+      enemy.engagedAt = 0;
+      enemy.shieldUntil = 0;
+      enemy.shieldHp = 0;
+      enemy.staggerUntil = 0;
+    }
+    this.enemies.push(enemy);
+    return enemy;
+  }
+  #moveEnemies(dt) {
+    const { session: s } = this;
+    if (this.boss?.hp > 0) {
+      this.boss.age += dt;
+      this.#moveBoss(this.boss, dt);
+    }
+    if (s.phase !== "playing") return;
+    const escaped = [];
+    this.enemies = this.enemies.filter((enemy) => {
+      if (enemy.hp <= 0 || (enemy.bountyUntil && enemy.bountyUntil <= s.elapsedMs)) return false;
+      if (enemy === this.boss || s.phase !== "playing") return true;
+      enemy.age += dt;
+      const now = s.elapsedMs;
+      const frozen = enemy.frozenUntil > now;
+      const slowdown = frozen ? 0 : enemy.icedUntil > now ? 0.64 : 1;
+      const step = dt * slowdown;
+      const previousX = enemy.x;
+      enemy.drift += step;
+      enemy.y += enemy.speed * step;
+      if (enemy.formation === "cross" && enemy.drift < 3.4) enemy.x += enemy.direction * 60 * step;
+      if (enemy.formation === "arc" && enemy.drift < 4.1) {
+        enemy.x -= enemy.direction * Math.sin(enemy.drift * 1.45) * 113 * step;
+        enemy.y += 38 * Math.min(enemy.drift, 2.3) * step;
+      }
+      if (enemy.formation === "flank" && enemy.drift < 3.7) {
+        const turnIn = Math.max(0, 1 - Math.abs(enemy.drift - 1.9) / 1.8);
+        enemy.x -= enemy.direction * 143 * turnIn * step;
+      }
+      if (enemy.flight === "weave") enemy.x += Math.cos(enemy.drift * 2.3) * (enemy.id === "normal_scout" ? 116 : 66) * step;
+      if (enemy.flight === "cross") enemy.x += (enemy.direction || 1) * Math.cos(enemy.drift * 1.2) * 63 * step;
+      if (enemy.flight === "dive" || enemy.flight === "rush") {
+        enemy.y += step * Math.min(65, enemy.drift * 19);
+        if (enemy.flight === "rush") enemy.x += Math.sign(s.ship.x - enemy.x) * 40 * step;
+      }
+      if (enemy.flight === "bomber" && !frozen) this.#bomber(enemy, step);
+      enemy.x = Math.max(26, Math.min(694, enemy.x));
+      enemy.turn = (enemy.x - previousX) / Math.max(dt, 0.001) * 0.00125;
+      if (enemy.hp > 0 && !enemy.summoned && enemy.y >= FIELD.height + 24) {
+        escaped.push(enemy);
+        return false;
+      }
+      if (!frozen && enemy.attack && enemy.y >= 85 && enemy.y < 930 && enemy.age >= enemy.nextFire) {
+        this.#fireEnemy(enemy);
+
+第九空域游戏软件 V1.0                                      第 6 页 / 共 60 页
+==============================================================================
+      }
+      if (enemy.hp > 0 && touches(enemy, s.ship, enemy.radius + HIT_RADIUS)) this.#damageShip(enemy.damage);
+      return enemy.hp > 0 && enemy.y < FIELD.height + 105;
+    });
+    for (const enemy of escaped) {
+      if (s.phase !== "playing") break;
+      this.#handleBreach(enemy);
+    }
+  }
+  #handleBreach(enemy) {
+    const s = this.session;
+    const cost = enemy.category === "normal" ? 1 : 2;
+    const combo = s.combo;
+    s.breaches++;
+    if (s.invulnerableMs > 0) {
+      s.hp = Math.max(1, s.hp - cost * 4);
+      this.events.push({ type: "hurt", x: s.ship.x, y: s.ship.y, color: CRIMSON });
+    } else {
+      this.#damageShip(cost * 6);
+    }
+    s.combo = Math.floor(combo * 0.5);
+    s.breachMeter += cost;
+    const { x, id: enemyId } = enemy;
+    const { breachMeter: meter, breachMax: max } = s;
+    this.events.push({ type: "breach", x, cost, meter, max, enemyId });
+    this.events.push({ type: "mechanism", x, y: FIELD.height - 82, label: `防线警戒 ${Math.min(meter, max)}/${max}`, color: CRIMSON });
+    if (meter < max) return;
+    s.breachMeter = 0;
+    s.hp = Math.max(0, s.hp - 18);
+    if (s.hp === 0) s.phase = "defeat";
+    for (const lane of [180, 360, 540]) this.#spawn("elite_fighter", lane, -40, { summoned: true });
+    this.events.push({ type: "breach-alarm", x: 360, y: 120 });
+    this.events.push({ type: "mechanism", x: 360, y: 120, label: "防线失守 · 追猎反扑", color: CRIMSON });
+  }
+  #bomber(enemy, dt) {
+    const { ship, elapsedMs } = this.session;
+    if (enemy.fuseUntil) {
+      if (elapsedMs >= enemy.fuseUntil) {
+        this.events.push({ type: "blast", x: enemy.x, y: enemy.y, radius: 85, color: CRIMSON, accent: GOLD, hostile: true });
+        if (touches(enemy, ship, 85 + HIT_RADIUS)) this.#damageShip(enemy.summoned ? 24 : 22);
+        enemy.hp = 0;
+      }
+      return;
+    }
+    if ((enemy.summoned || enemy.y > 300) && ship.y > enemy.y - 50) {
+      enemy.x += Math.sign(ship.x - enemy.x) * (enemy.summoned ? 165 : 108) * dt;
+    }
+    if (touches(enemy, ship, 178)) {
+      enemy.fuseUntil = elapsedMs + 810;
+      enemy.speed = 72;
+      this.events.push({ type: "bomber-warning", x: enemy.x, y: enemy.y, radius: 85, color: CRIMSON, accent: GOLD });
+    }
+
+第九空域游戏软件 V1.0                                      第 7 页 / 共 60 页
+==============================================================================
+  }
+  #bullet(x, y, direction, speed, enemy, options = {}) {
+    if (this.enemyShots.length >= 520) return;
+    const s = this.session;
+    const speedScale = (s.hardcore ? 1.18 : 1) * Math.min(1.85, 1 + (s.loop - 1) * 0.10)
+      * (s.mutator?.id === "electromagnetic" ? 1.12 : 1) * (enemy.bulletCatchUp ?? 1);
+    const damage = ((options.damage ?? enemy.damage) + (enemy.flagship ? 4 : 0)) * (s.hardcore ? 1.25 : 1);
+    const velocity = speed * speedScale;
+    this.enemyShots.push({
+      x, y, vx: Math.sin(direction) * velocity, vy: Math.cos(direction) * velocity, speedScale,
+      radius: options.missile ? 11 : enemy.category === "boss" ? 8 : 6,
+      ...options, damage,
+      color: options.pulse ? options.color : CRIMSON, coreColor: WHITE,
+    });
+  }
+  #fireEnemy(enemy) {
+    const { ship, elapsedMs } = this.session;
+    const { x, category, attack } = enemy;
+    const y = enemy.y + enemy.radius * 0.65;
+    const aim = Math.atan2(ship.x - x, Math.max(225, ship.y - y));
+    const speed = category === "normal" ? 315 : 350;
+    enemy.nextFire = enemy.age + enemy.interval * this.session.enemyCadence / 1000;
+    if (attack === "missile" || attack === "launcher") {
+      const spreads = attack === "launcher" ? [-0.38, 0.38] : [0];
+      for (const offset of spreads) this.#bullet(x + offset * 59, y, aim + offset, 232, enemy,
+        { missile: true, hp: 18, fuel: 2.1, accent: GOLD });
+    } else if (attack === "jam") {
+      enemy.jamUntil = elapsedMs + 1250;
+      this.events.push({ type: "jam", x, y, color: CRIMSON, radius: 210 });
+      for (let i = 0; i < 11; i++) this.#bullet(x, y, 2 * Math.PI * i / 11, 215, enemy);
+    } else if (attack === "twin" || attack === "broadside") {
+      for (const side of [-1, 1]) this.#bullet(x + side * 18, y, attack === "twin" ? side * 0.025 : aim + side * 0.3, speed, enemy);
+    } else if (attack === "burst") {
+      for (let i = 0; i < 4; i++) this.#bullet(x, y, aim, speed * (0.66 + i * 0.2), enemy);
+    } else if (attack === "fan" || attack === "fortress") {
+      for (const offset of [-0.52, -0.27, 0, 0.27, 0.52]) this.#bullet(x, y, aim + offset, speed, enemy);
+    } else {
+      this.#bullet(x, y, attack === "slant" ? -(enemy.direction || 1) * 0.47 : aim, speed, enemy);
+    }
+    if (this.session.hardcore && category === "elite") {
+      for (const offset of FAN) this.#bullet(x, y, aim + offset, 326, enemy);
+    }
+    if (enemy.ace === "sniper") {
+      for (const offset of [-0.08, 0.08]) this.#bullet(x, y, aim + offset, speed * 1.35, enemy);
+    }
+  }
+  #moveBoss(boss, dt) {
+    const s = this.session;
+    const now = s.elapsedMs;
+    boss.y = Math.min(308, boss.y + boss.speed * dt);
+    if (boss.age < 3.25) return;
+    boss.engagedAt ||= now;
+
+第九空域游戏软件 V1.0                                      第 8 页 / 共 60 页
+==============================================================================
+    if (now >= boss.shieldUntil) boss.shieldHp = 0;
+    if (boss.staggerUntil > now) return;
+    if (!boss.laser) {
+      const speed = (boss.phase === 1 ? 0.75 : 0.95) * (boss.parts[0].hp <= 0 ? 0.86 : 1)
+        * (boss.parts[1].hp <= 0 ? 0.86 : 1);
+      const amplitude = boss.id === "boss_citadel" ? 102 : boss.id === "boss_overmind" ? 154 : 142;
+      boss.sway += dt * speed * (boss.frozenUntil > now ? 0.56 : 1);
+      boss.x = 360 + Math.sin(boss.sway) * amplitude;
+    }
+    if (boss.gravityUntil > now) {
+      const remaining = boss.gravityUntil - now;
+      const direction = remaining > 480 ? 1 : -1;
+      const pull = (FIELD.width / 2 - s.ship.x) * direction * dt * 0.8;
+      s.ship.x = Math.max(FIELD.side, Math.min(FIELD.width - FIELD.side, s.ship.x + pull));
+    }
+    if (boss.laser) {
+      this.#updateBossLaser(boss);
+      return;
+    }
+    if (boss.rings && now >= boss.rings.next) this.#launchBossRing(boss);
+    if (boss.age < boss.nextFire || (this.bossShielded && !boss.shieldHp)) return;
+    const patterns = BOSS_PATTERNS[boss.id][boss.phase - 1];
+    const pattern = patterns[boss.patternIndex++ % patterns.length];
+    const cooldown = { aimed: 1.0, spiral: 1.22, laser: 1.55, blades: 1.1, missiles: 1.05,
+      fans: 0.95, corridor: 0.86, gravity: 1.15, bombers: 1.05 }[pattern];
+    const enraged = boss.id === "boss_marshal" && boss.phase === 3 ? 0.8 : 1;
+    boss.nextFire = boss.age + cooldown * enraged * s.enemyCadence;
+    switch (pattern) {
+      case "spiral":
+        boss.rings = { index: 0, total: boss.id === "boss_overmind" ? (boss.phase === 3 ? 8 : 4) : 3, next: now };
+        this.#launchBossRing(boss);
+        break;
+      case "laser": this.#beginBossLaser(boss); break;
+      case "blades": this.#bossBlades(boss); break;
+      case "missiles": this.#citadelVolley(boss, true); break;
+      case "fans": this.#citadelVolley(boss, false); break;
+      case "corridor": this.#citadelCorridor(boss); break;
+      case "bombers": this.#overmindBombers(); break;
+      case "gravity":
+        boss.gravityUntil = now + 960;
+        this.events.push({ type: "boss-gravity", x: FIELD.width / 2, y: boss.y, duration: 960 });
+        this.#bossAimed(boss);
+        break;
+      case "aimed": this.#bossAimed(boss); break;
+    }
+    if (s.hardcore) this.#bossAimed(boss, true);
+  }
+  #bossAimed(boss, extra = false) {
+    const { ship } = this.session;
+    const { x, y } = this.bossTargets().find(({ part }) => part.id === "core");
+    const aim = Math.atan2(ship.x - x, Math.max(160, ship.y - y));
+    this.events.push({ type: "barrage", mode: extra ? "hardcore" : "aimed", part: "core", x, y, color: CRIMSON, count: FAN.length });
+
+第九空域游戏软件 V1.0                                      第 9 页 / 共 60 页
+==============================================================================
+    for (const offset of FAN) this.#bullet(x, y, aim + offset, extra ? 360 : 316, boss, { part: "core" });
+  }
+  #citadelVolley(boss, missiles) {
+    const { ship } = this.session;
+    const nodes = this.bossTargets();
+    const wings = nodes.filter(({ part }) => part.id !== "core");
+    const emitters = missiles || wings.length > 0 ? wings : nodes;
+    for (const { x, y, part } of emitters) {
+      const side = part.id === "core" ? 0 : Math.sign(part.dx);
+      const aim = Math.atan2((ship.x + boss.x) / 2 - x - side * 120, Math.max(240, ship.y - y));
+      const offsets = missiles ? [-0.21, 0.21] : side ? [-0.28, 0, 0.28] : FAN;
+      this.events.push({ type: "barrage", mode: missiles ? "missiles" : "fans", part: part.id,
+        x, y, color: missiles ? GOLD : CRIMSON, count: offsets.length });
+      for (const offset of offsets) {
+        const options = missiles ? { missile: true, hp: 25, fuel: 1.65, accent: GOLD } : {};
+        this.#bullet(x, y, aim + offset, missiles ? 235 : 304, boss, { ...options, part: part.id });
+      }
+    }
+  }
+  #citadelCorridor(boss) {
+    const middle = FIELD.width / 2;
+    const nodes = this.bossTargets();
+    const side = boss.corridorSide;
+    const node = nodes.find(({ part }) => part.id === (side < 0 ? "left" : "right"));
+    boss.corridorSide *= -1;
+    if (!node) {
+      if (nodes.length === 1) this.#bossAimed(boss);
+      return;
+    }
+    const { x, y, part } = node;
+    this.events.push({ type: "barrage", mode: "corridor", part: part.id, side, x, y, color: CRIMSON, count: 9 });
+    for (let i = 0; i < 9; i++) {
+      const goalX = middle + side * (52 + i * 39);
+      const originX = x + side * (i - 4) * 19;
+      const angle = Math.atan2(goalX - originX, 920 - y);
+      this.#bullet(originX, y + i * 8, angle, 347 + i * 5, boss, { part: part.id });
+    }
+  }
+  #overmindBombers() {
+    for (const { x, y, part } of this.bossTargets()) {
+      if (part.id === "core") continue;
+      const count = 3;
+      this.events.push({ type: "barrage", mode: "bombers", part: part.id, count, x, y, color: CRIMSON });
+      for (let i = 0; i < count; i++) {
+        this.#spawn("normal_bomber", x + (i - (count - 1) / 2) * 34, y - i * 42, { summoned: true });
+      }
+    }
+  }
+  #launchBossRing(boss) {
+    const ring = boss.rings;
+    const { x, y } = this.bossTargets().find(({ part }) => part.id === "core");
+    const overmind = boss.id === "boss_overmind";
+
+第九空域游戏软件 V1.0                                      第 10 页 / 共 60 页
+==============================================================================
+    const count = overmind ? (boss.phase === 3 ? 16 : 12) : 8;
+    const reverse = overmind && ring.index % 2 === 1;
+    const direction = reverse ? -1 : 1;
+    const color = reverse ? GOLD : CRIMSON;
+    this.events.push({ type: "boss-pulse", x, y, color, radius: 104, count });
+    for (let i = 0; i < count; i++) {
+      const angle = boss.spiralAngle * direction + i * Math.PI * 2 / count;
+      this.#bullet(x, y, angle, reverse ? 288 : overmind ? 312 : 269, boss, {
+        part: "core", radius: 10, color, pulse: true, turnRate: overmind ? direction * 0.39 : 0.15,
+      });
+    }
+    boss.spiralAngle += 0.21;
+    ring.index++;
+    if (ring.index === ring.total) boss.rings = null;
+    else ring.next += (overmind ? (ring.index % 2 ? 115 : 190) : 240) * this.session.enemyCadence;
+  }
+  #bossBlades(boss) {
+    const offsets = [-0.26, -0.09, 0.09, 0.26];
+    for (const { x, y, part } of this.bossTargets()) {
+      if (part.id === "core") continue;
+      const side = Math.sign(part.dx);
+      const crossX = boss.x - side * 170 + (this.session.ship.x - boss.x) * 0.25;
+      const aim = Math.atan2(crossX - x, Math.max(280, this.session.ship.y - y));
+      this.events.push({ type: "barrage", mode: "blades", part: part.id, count: offsets.length, x, y, color: GOLD });
+      for (const offset of offsets) this.#bullet(x, y, aim + offset, 376, boss, {
+        part: part.id, damage: boss.damage + 3, accent: GOLD, blade: true, spin: side,
+      });
+    }
+  }
+  #beginBossLaser(boss) {
+    const { elapsedMs: now, ship } = this.session;
+    const core = boss.parts[2];
+    const overmind = boss.id === "boss_overmind";
+    const x = overmind ? FIELD.width * (boss.beamLane < 0 ? 0.28 : 0.72) : boss.x + core.dx;
+    const y = boss.y + core.dy;
+    const angle = overmind ? 0 : Math.atan2(ship.x - x, ship.y - y);
+    const charge = overmind ? 580 : 900;
+    const duration = overmind ? 440 : 480;
+    const width = overmind ? 160 : 42;
+    boss.laser = {
+      x, y, ex: x + Math.sin(angle) * 1500, ey: y + Math.cos(angle) * 1500,
+      angle, sweep: overmind ? 0 : (ship.x < FIELD.width / 2 ? -0.43 : 0.43),
+      phase: "charge", chargeUntil: now + charge, activeUntil: now + charge + duration, duration,
+      width, hit: false, color: CRIMSON,
+    };
+    if (overmind) boss.beamLane *= -1;
+    this.events.push({ type: "boss-laser-charge", x, y, duration: charge, color: CRIMSON });
+  }
+  #updateBossLaser(boss) {
+    const now = this.session.elapsedMs;
+    const laser = boss.laser;
+    if (now >= laser.activeUntil) {
+
+第九空域游戏软件 V1.0                                      第 11 页 / 共 60 页
+==============================================================================
+      boss.laser = null;
+      return;
+    }
+    if (laser.phase === "charge" && now >= laser.chargeUntil) {
+      laser.phase = "fire";
+      this.events.push({ type: "boss-laser-fire", x: laser.x, y: laser.y, duration: laser.duration, color: CRIMSON, accent: WHITE });
+    }
+    if (laser.phase !== "fire") return;
+    if (laser.sweep) {
+      const angle = laser.angle + laser.sweep * (now - laser.chargeUntil) / laser.duration;
+      laser.ex = laser.x + Math.sin(angle) * 1500;
+      laser.ey = laser.y + Math.cos(angle) * 1500;
+    }
+    if (!laser.hit && pointToSegmentDistance(this.session.ship, laser, { x: laser.ex, y: laser.ey }) <= laser.width / 2 + HIT_RADIUS) {
+      laser.hit = this.#damageShip((boss.damage + 10) * (this.session.hardcore ? 1.25 : 1));
+    }
+  }
+  #movePlayerShots(dt) {
+    const active = this.shots;
+    const missiles = this.enemyShots.filter((bullet) => bullet.missile);
+    this.shots = [];
+    for (const shot of active) {
+      if (this.session.phase !== "playing" || this.transitionPending) break;
+      this.weapons.steerShot(shot, dt);
+      shot.x += shot.vx * dt;
+      shot.y += shot.vy * dt;
+      if (shot.y < -48 || shot.y > 1328 || shot.x < -58 || shot.x > 778) continue;
+      const missile = missiles.find((bullet) => !bullet.gone && touches(shot, bullet, bullet.radius + 7));
+      if (missile) {
+        missile.hp -= shot.damage * this.session.weaponDamageScale;
+        this.events.push({ type: "impact", x: shot.x, y: shot.y, vx: shot.vx, vy: shot.vy, color: shot.color, kind: shot.kind });
+        if (missile.hp <= 0) {
+          missile.gone = true;
+          this.events.push({ type: "blast", x: missile.x, y: missile.y, radius: 27, color: CRIMSON, accent: GOLD, hostile: true });
+        }
+        continue;
+      }
+      let survives = true;
+      for (const enemy of this.enemies) {
+        if (enemy.hp <= 0 || enemy === shot.exclude || enemy.y < 10) continue;
+        let part;
+        const width = shot.width ?? 5;
+        if (enemy === this.boss) {
+          if (Math.abs(shot.x - enemy.x) > enemy.hitWidth + width || Math.abs(shot.y - enemy.y) > enemy.hitHeight + width) continue;
+          const node = this.bossTargets().filter((node) => !shot.hit?.has(node.part) && touches(shot, node, node.part.radius + width))
+            .sort((a, b) => distanceSquared(shot, a) - distanceSquared(shot, b))[0];
+          if (!node) continue;
+          part = node.part;
+        } else if (shot.hit?.has(enemy) || !touches(shot, enemy, enemy.radius + width)) continue;
+        if (enemy === this.boss && this.bossShielded) {
+          this.#chipBossShield(enemy, this.weapons.damageFor(shot, enemy));
+          this.events.push({ type: "impact", x: shot.x, y: shot.y, vx: shot.vx, vy: shot.vy,
+
+第九空域游戏软件 V1.0                                      第 12 页 / 共 60 页
+==============================================================================
+            color: 0x33ddcc, kind: shot.kind });
+          survives = false;
+          break;
+        }
+        let damage = this.weapons.damageFor(shot, enemy);
+        if (enemy.shielded && shot.kind !== "lance" && shot.kind !== "arc" && shot.y >= enemy.y - 8 &&
+          Math.abs(shot.x - enemy.x) < enemy.radius * 0.78) damage *= 0.37;
+        this.#hitEnemy(enemy, damage, part, shot);
+        this.weapons.impact(shot, enemy, part);
+        if (shot.pierce <= 0 || !shot.hit) {
+          survives = false;
+          break;
+        }
+        shot.pierce--;
+        shot.hit.add(part ?? enemy);
+      }
+      if (survives) this.shots.push(shot);
+    }
+  }
+  targetsNear(origin, radius, excludes) {
+    return this.enemies.filter((enemy) => enemy !== excludes && enemy.hp > 0 && enemy.y >= 10 && touches(origin, enemy, radius));
+  }
+  strikeAreaTarget(enemy, damage, part) {
+    if (enemy.hp <= 0 || this.session.phase !== "playing") return;
+    if (enemy === this.boss && this.bossShielded) this.#chipBossShield(enemy, damage);
+    else this.#hitEnemy(enemy, damage, part ?? (enemy === this.boss ? enemy.parts[2] : null), null);
+  }
+  #chipBossShield(boss, damage) {
+    if (boss.shieldHp <= 0) return;
+    const s = this.session;
+    boss.shieldHp = Math.max(0, boss.shieldHp - damage * s.weaponDamageScale);
+    if (boss.shieldHp > 0) return;
+    boss.shieldUntil = 0;
+    boss.staggerUntil = s.elapsedMs + 3000;
+    this.#clearEnemyShots();
+    this.events.push({ type: "boss-stagger", id: boss.id, x: boss.x, y: boss.y, durationMs: 3000 });
+  }
+  #hitEnemy(enemy, amount, part, shot) {
+    const s = this.session;
+    const target = part ?? enemy;
+    if (s.phase !== "playing" || this.transitionPending || target.hp <= 0) return;
+    const amp = enemy.shockedUntil > s.elapsedMs ? 1.22 : 1;
+    const aegis = enemy !== this.boss && enemy.ace !== "aegis" &&
+      this.enemies.some((ally) => ally.hp > 0 && ally.ace === "aegis" && touches(enemy, ally, 180)) ? 0.65 : 1;
+    const critical = s.comboTier === 3 && this.random() < 0.18;
+    let damage = amount * amp * aegis * s.weaponDamageScale * (critical ? 1.5 : 1);
+    const bossCore = part?.id === "core";
+    if (bossCore && enemy.parts.slice(0, 2).every(({ hp }) => hp <= 0)) damage *= CORE_EXPOSURE[enemy.id];
+    if (bossCore && enemy.staggerUntil > s.elapsedMs) damage *= 1.6;
+    const gate = bossCore && PHASE_GATES[enemy.phase - 1] * target.maxHp;
+    const phaseChange = gate > 0 && target.hp - damage <= gate;
+    const applied = Math.min(damage, target.hp - (phaseChange ? gate : 0));
+
+第九空域游戏软件 V1.0                                      第 13 页 / 共 60 页
+==============================================================================
+    target.hp -= applied;
+    enemy.flashUntil = s.elapsedMs + 70;
+    if (shot) this.events.push({ type: "impact", x: shot.x, y: shot.y, vx: shot.vx, vy: shot.vy, color: shot.color, pierce: shot.pierce,
+      kind: shot.kind, powered: shot.powered });
+    if (critical) this.events.push({ type: "mechanism", label: "连击暴击", x: enemy.x, y: enemy.y, color: GOLD });
+    s.charge(applied * 0.016);
+    if (phaseChange) this.#changeBossPhase(enemy, part);
+    if (part && !bossCore) {
+      if (target.hp <= 0) this.#breakBossPart(enemy, part);
+      return;
+    }
+    enemy.hp = target.hp;
+    if (enemy.hp <= 0) this.#resolveKill(enemy);
+  }
+  #changeBossPhase(boss, core) {
+    const now = this.session.elapsedMs;
+    boss.phase++;
+    const breakable = boss.id === "boss_citadel" && boss.phase === 2;
+    const shieldMs = breakable ? 2700 : 1800;
+    boss.shieldUntil = now + shieldMs;
+    boss.shieldHp = breakable ? 260 : 0;
+    boss.nextFire = boss.age + (breakable ? 0.46 : shieldMs / 1000 + 0.10);
+    boss.patternIndex = 0;
+    boss.spiralAngle += Math.PI / 4;
+    boss.laser = null;
+    boss.rings = null;
+    boss.gravityUntil = 0;
+    this.#clearEnemyShots();
+    this.events.push({ type: "boss-phase", id: boss.id, phase: boss.phase,
+      x: boss.x + core.dx, y: boss.y + core.dy, color: CRIMSON, accent: GOLD, radius: 860 });
+  }
+  #breakBossPart(boss, part) {
+    const x = boss.x + part.dx;
+    const y = boss.y + part.dy;
+    this.events.push({ type: "part-break", id: part.id, label: part.label, x, y, heavy: true });
+    this.session.parts += 8;
+    this.#cancelToGold();
+    this.pickups.push({ x, y, type: "gold", value: 0, speed: 760, deliver: true,
+      shield: part.id === "left" ? 18 : 0, energy: part.id === "right" ? 25 : 0 });
+  }
+  #resolveKill(enemy) {
+    const s = this.session;
+    const heavy = enemy.category !== "normal";
+    s.recordKill();
+    s.parts += heavy ? 5 : 1;
+    if (s.fighter.weapon === "bio" && s.heal(2) > 0) {
+      s.rageUntil = s.elapsedMs + 5500 + 650 * (s.build.main - 1);
+      if (s.build.synergy && s.shield < 12) s.addShield(2);
+    }
+    s.charge((heavy ? 7 : 3) * (s.frontline ? 1.8 : 1));
+    this.events.push({ type: "destroy", x: enemy.x, y: enemy.y, heavy, id: enemy.id, scale: enemy.scale, turn: enemy.turn });
+    if (enemy === this.boss) {
+
+第九空域游戏软件 V1.0                                      第 14 页 / 共 60 页
+==============================================================================
+      if (!s.bossDamaged) s.flawlessBosses++;
+      s.breachMeter = 0;
+      this.events.push({ type: "sector-clear", id: enemy.id, stage: s.stage, durationMs: s.elapsedMs - s.stageStartedAt });
+      this.transitionPending = s.mode === "endless" || s.stage < CAMPAIGN.length;
+      enemy.laser = null;
+      enemy.rings = null;
+      this.#cancelToGold();
+      this.#pollAchievements();
+      if (!this.transitionPending) {
+        s.phase = "victory";
+        this.pickups = this.pickups.filter((pickup) => {
+          if (!pickup.deliver) return true;
+          this.#collectPickup(pickup);
+          return false;
+        });
+      }
+      return;
+    }
+    const xpScale = (s.frontline ? 1.5 : 1) * (s.mutator?.id === "elite-swarm" ? 1.25 : 1);
+    const { x, y } = enemy;
+    const addCrystal = (dx, dy, value, type = "gold") => {
+      const starter = enemy.opening && s.level === 1;
+      this.pickups.push({ x: x + dx, y: y + dy, type, value: value * xpScale, speed: 0,
+        readyAt: starter ? s.stageStartedAt + 7000 : 0, attract: starter });
+    };
+    if (enemy.bountyUntil || enemy.flagship) {
+      for (const offset of [-52, -26, 0, 26, 52]) addCrystal(offset, Math.abs(offset) * 0.25, 4);
+    } else addCrystal(0, 0, heavy ? 4 : enemy.opening ? 1.5 : 1, heavy ? "gold" : "green");
+    if (touches(enemy, s.ship, 220)) addCrystal(0, 14, 2.5);
+    if (enemy.flagship || heavy && !enemy.bountyUntil && this.random() < 0.2) {
+      this.pickups.push({ x: x + 22, y: y + 14, type: "heal", value: enemy.flagship ? 34 : 20, speed: 0 });
+    }
+    if (enemy.flagship) {
+      s.breachMeter = 0;
+      for (const pickup of this.pickups) pickup.speed = Math.max(480, pickup.speed);
+      s.charge(35, false);
+      this.events.push({ type: "flagship-down" });
+    }
+    if (enemy.ace === "splitter") {
+      for (const dx of [-42, 0, 42]) this.#spawn("normal_bomber", enemy.x + dx, enemy.y, { summoned: true });
+    }
+    if (enemy.bountyUntil) {
+      s.heal(s.maxHp * 0.25);
+      s.addShield(20);
+      s.freeUpgrades++;
+      this.events.push({ type: "bounty-clear" });
+    }
+    if (s.kills >= 300 || s.bestCombo >= 60) this.#pollAchievements();
+  }
+  #pollAchievements() {
+    for (const ach of checkAchievements(this.session)) {
+      this.events.push({ type: "achievement", ...ach });
+
+第九空域游戏软件 V1.0                                      第 15 页 / 共 60 页
+==============================================================================
+    }
+  }
+  #cancelToGold() {
+    let count = 0;
+    for (const shot of this.enemyShots) {
+      if (shot.gone) continue;
+      this.pickups.push({ x: shot.x, y: shot.y, type: "gold", value: 0.35, energy: 1.2, speed: 780, deliver: true });
+      if (++count === 60) break;
+    }
+    this.session.maxBulletCancel = Math.max(this.session.maxBulletCancel ?? 0, count);
+    this.#clearEnemyShots();
+    this.events.push({ type: "bullet-cancel", count });
+    this.#pollAchievements();
+  }
+  #clearEnemyShots() {
+    for (const shot of this.enemyShots) shot.gone = true;
+    this.enemyShots.length = 0;
+  }
+  clearShotsNear(origin, radius) {
+    this.enemyShots = this.enemyShots.filter((shot) => !shot.gone && !touches(origin, shot, radius + shot.radius));
+  }
+  #emergencyPulse() {
+    const s = this.session;
+    s.emergencyPending = false;
+    const rank = s.build.secondary[MODULE.emergency];
+    if (!rank) return;
+    const radius = 120 + 14 * (rank - 1);
+    s.addShield(12 + 4 * (rank - 1));
+    this.clearShotsNear(s.ship, radius);
+    this.events.push({ type: "reflect", x: s.ship.x, y: s.ship.y, color: 0x33ddcc, radius });
+  }
+  #moveEnemyShots(dt) {
+    const s = this.session;
+    const eater = s.build.secondary[CONTRACT.eater];
+    const grazeRadius = GRAZE_RADIUS * (eater ? 1.45 : 1);
+    let xp = 0;
+    let pulses = 0;
+    const kept = this.enemyShots.filter((shot) => {
+      if (shot.gone || s.phase !== "playing") return false;
+      shot.age = (shot.age ?? 0) + dt;
+      if (shot.missile && shot.fuel > 0) {
+        shot.fuel -= dt;
+        const dir = Math.atan2(s.ship.x - shot.x, Math.max(23, s.ship.y - shot.y));
+        const speed = 258 * (shot.speedScale ?? 1);
+        shot.vx += (Math.sin(dir) * speed - shot.vx) * dt * 2.2;
+        shot.vy += (Math.cos(dir) * speed - shot.vy) * dt * 2.2;
+      }
+      if (shot.turnRate) {
+        const angle = shot.turnRate * dt;
+        [shot.vx, shot.vy] = [
+          shot.vx * Math.cos(angle) + shot.vy * Math.sin(angle),
+          shot.vy * Math.cos(angle) - shot.vx * Math.sin(angle),
+
+第九空域游戏软件 V1.0                                      第 16 页 / 共 60 页
+==============================================================================
+        ];
+      }
+      shot.x += shot.vx * dt;
+      shot.y += shot.vy * dt;
+      const dist = distanceSquared(shot, s.ship);
+      if (dist <= (shot.radius + HIT_RADIUS) ** 2) {
+        this.#damageShip(shot.damage);
+        return false;
+      }
+      if (!shot.grazed) {
+        if (dist <= grazeRadius ** 2) {
+          shot.near = true;
+        } else if (shot.near) {
+          shot.grazed = true;
+          if (s.recordGraze()) this.events.push({ type: "fever", active: true, until: s.feverUntil });
+          if (s.grazes >= 60) this.#pollAchievements();
+          xp += s.frontline ? 0.18 : 0.12;
+          if (eater && ++s.contractGrazes % 10 === 0) pulses++;
+          this.weapons.counterGraze(shot);
+          this.events.push({ type: "graze", x: s.ship.x, y: s.ship.y, toX: shot.x, toY: shot.y, color: 0x64f7ff });
+        }
+      }
+      return shot.y < FIELD.height + 18 && shot.y > -42 && shot.x > -18 && shot.x < FIELD.width + 18;
+    });
+    this.enemyShots = kept.filter((shot) => !shot.gone);
+    if (pulses) {
+      s.addShield(pulses * 6);
+      this.clearShotsNear(s.ship, 260);
+      this.events.push({ type: "reflect", x: s.ship.x, y: s.ship.y, color: 0x33ddcc, radius: 260 });
+    }
+    if (xp > 0) {
+      s.gainXp(xp);
+      if (s.phase === "upgrade") this.events.push({ type: "level" });
+    }
+  }
+  #damageShip(damage) {
+    const s = this.session;
+    const guard = s.guard;
+    if (!s.takeDamage(damage)) return false;
+    if (!guard) {
+      this.events.push({ type: "hurt", x: s.ship.x, y: s.ship.y, color: CRIMSON });
+      return true;
+    }
+    this.nextGuardMs = s.elapsedMs + Math.max(4500, 10000 - 850 * (s.build.main - 1));
+    this.#clearEnemyShots();
+    const radius = 235 + 26 * (s.build.main - 1);
+    this.events.push({ type: "reflect", x: s.ship.x, y: s.ship.y, color: 0xe1efff, radius: 820 });
+    this.events.push({ type: "mechanism", label: "反震清弹!", x: s.ship.x, y: s.ship.y, color: 0xe1efff });
+    for (const enemy of this.targetsNear(s.ship, radius)) this.strikeAreaTarget(enemy, 47 + 16 * (s.build.main - 1));
+    return true;
+  }
+  #movePickups(dt) {
+
+第九空域游戏软件 V1.0                                      第 17 页 / 共 60 页
+==============================================================================
+    const s = this.session;
+    const radius = PICKUP_RADIUS + 50 * (s.build.secondary[MODULE.magnet] ?? 0);
+    this.pickups = this.pickups.filter((pickup) => {
+      if (s.phase !== "playing") return true;
+      const dx = s.ship.x - pickup.x;
+      const dy = s.ship.y - pickup.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= 14 && !(pickup.readyAt > s.elapsedMs)) {
+        this.#collectPickup(pickup);
+        if (s.phase === "upgrade") this.events.push({ type: "level" });
+        return false;
+      }
+      if (pickup.attract || pickup.speed > 0 || dist <= radius) {
+        pickup.speed = Math.min(1060, pickup.speed + 2200 * dt);
+        const step = Math.min(1, pickup.speed * dt / (dist || 1));
+        pickup.x += dx * step;
+        pickup.y += dy * step;
+      } else pickup.y += dt * 142;
+      return pickup.y < FIELD.height + 24;
+    });
+  }
+  #collectPickup(pickup) {
+    const s = this.session;
+    if (pickup.type === "heal") s.heal(pickup.value);
+    else {
+      s.addShield(pickup.shield ?? 0);
+      if (pickup.energy) s.charge(pickup.energy, false);
+      s.gainXp(pickup.value);
+    }
+    this.events.push({ type: "pickup", x: pickup.x, y: pickup.y, pickup: pickup.type });
+  }
+  triggerOverload() {
+    const s = this.session;
+    if (this.transitionPending || !s.startOverload()) return false;
+    const { color, count, spread, damage, piercing } = s.overload;
+    this.#cancelToGold();
+    this.events.push({ type: "overload", x: s.ship.x, y: s.ship.y, color, kind: s.fighter.weapon });
+    for (const enemy of this.enemies) {
+      if (enemy.y < 0 || enemy.y > FIELD.height) continue;
+      this.strikeAreaTarget(enemy, damage);
+      if (s.fighter.weapon === "ice" && enemy !== this.boss && enemy.hp > 0) enemy.frozenUntil = s.elapsedMs + 1500;
+    }
+    this.enemies = this.enemies.filter((enemy) => enemy.hp > 0);
+    if (this.transitionPending || s.phase === "victory") return true;
+    for (let i = 0; i < count; i++) {
+      const angle = (i - (count - 1) / 2) * spread;
+      this.weapons.launch(s.ship.x, s.ship.y - 26, angle, 26, { kind: "overload", color, speed: 920, pierce: piercing ? 4 : 0 });
+    }
+    return true;
+  }
+}
+export const CAMPAIGN = [
+
+第九空域游戏软件 V1.0                                      第 18 页 / 共 60 页
+==============================================================================
+  {
+    name: "高空突围", boss: "boss_marshal", bossName: "拦截统帅", flagship: "medium_fortress",
+    waves: [
+      ["锋矢俯冲", "v", ["normal_light_fighter", "normal_scout", "normal_gunner"]],
+      ["弧线突击", "arc", ["normal_interceptor", "normal_rusher", "normal_bomber"]],
+      ["护盾推进", "escort", ["elite_shield", "normal_gunner", "elite_fighter"]],
+      ["截获运输舰", "cargo", ["medium_transport", "normal_scout", "elite_missile"]],
+      ["交叉封锁", "flank", ["elite_spread", "normal_interceptor", "normal_bomber"]],
+    ],
+  },
+  {
+    name: "钢铁防线", boss: "boss_citadel", bossName: "重装要塞", flagship: "medium_launcher",
+    waves: [
+      ["锋矢截击", "v", ["normal_interceptor", "normal_scout", "normal_gunner"]],
+      ["电磁封锁", "arc", ["elite_jammer", "elite_spread", "normal_rusher"]],
+      ["重舰护航", "escort", ["medium_gunship", "elite_shield", "normal_gunner"]],
+      ["抢夺补给", "cargo", ["medium_transport", "elite_missile", "normal_scout"]],
+      ["多管齐射", "cross", ["medium_launcher", "elite_spread", "normal_bomber"]],
+    ],
+  },
+  {
+    name: "主脑核心", boss: "boss_overmind", bossName: "核心主脑", flagship: "medium_fortress",
+    waves: [
+      ["无人机猎群", "v", ["normal_light_fighter", "normal_scout", "normal_bomber"]],
+      ["电磁夹击", "flank", ["elite_jammer", "elite_missile", "normal_interceptor"]],
+      ["核心防卫", "escort", ["medium_launcher", "elite_shield", "medium_gunship"]],
+      ["末路补给", "cargo", ["medium_transport", "elite_spread", "normal_scout"]],
+      ["最后防线", "cross", ["medium_fortress", "elite_fighter", "normal_bomber", "elite_jammer", "elite_missile"]],
+    ],
+  },
+];
+export const WAVE_COUNT = CAMPAIGN[0].waves.length;
+export const WAVE_MS = 9000;
+export const BOSS_ARRIVAL_MS = 48750;
+export const MAX_ACTIVE_ENEMIES = 60;
+const ACES = ["aegis", "splitter", "sniper"];
+export const DISPLAY_TARGETS = Object.freeze({ fighter: 80, normal: 52, elite: 72, medium: 96, boss: 238 });
+const NORMAL = { hp: 33, speed: 142, radius: 25, damage: 12, interval: 2520 };
+const ELITE = { hp: 104, speed: 93, radius: 36, damage: 16, interval: 2218 };
+const MEDIUM = { hp: 183, speed: 80, radius: 44, damage: 20, interval: 2428 };
+export const ENEMY_PROFILES = {
+  normal_light_fighter: { ...NORMAL, flight: "dive", attack: "aimed" },
+  normal_scout: { ...NORMAL, hp: 25, flight: "weave", attack: "aimed", interval: 3150 },
+  normal_gunner: { ...NORMAL, flight: "line", attack: "twin" },
+  normal_interceptor: { ...NORMAL, flight: "cross", attack: "slant", speed: 155 },
+  normal_rusher: { ...NORMAL, hp: 26, flight: "rush", attack: null, speed: 189 },
+  normal_bomber: { ...NORMAL, hp: 44, flight: "bomber", attack: null, speed: 136 },
+  elite_fighter: { ...ELITE, flight: "weave", attack: "burst" },
+  elite_shield: { ...ELITE, hp: 134, flight: "line", attack: "twin", shielded: true },
+  elite_missile: { ...ELITE, flight: "line", attack: "missile", interval: 2822 },
+  elite_spread: { ...ELITE, flight: "weave", attack: "fan" },
+  elite_jammer: { ...ELITE, flight: "line", attack: "jam", interval: 2982 },
+
+第九空域游戏软件 V1.0                                      第 19 页 / 共 60 页
+==============================================================================
+  medium_transport: { ...MEDIUM, hp: 215, flight: "line", attack: null, speed: 76 },
+  medium_gunship: { ...MEDIUM, flight: "weave", attack: "broadside" },
+  medium_fortress: { ...MEDIUM, hp: 240, flight: "line", attack: "fortress", speed: 71 },
+  medium_launcher: { ...MEDIUM, flight: "line", attack: "launcher", interval: 2848 },
+  boss_marshal: { hp: 2100, speed: 145, radius: 52, damage: 22, interval: 1110, flight: "boss" },
+  boss_citadel: { hp: 3800, speed: 131, radius: 55, damage: 24, flight: "boss" },
+  boss_overmind: { hp: 5800, speed: 147, radius: 54, damage: 26, flight: "boss" },
+};
+const ELITES = Object.keys(ENEMY_PROFILES).filter((id) => id.startsWith("elite_"));
+const LAYOUTS = {
+  v: [[0, 0], [-62, 42], [62, 42], [-124, 84], [124, 84], [-180, 126], [180, 126]],
+  cross: [[-147, 0], [147, 18], [-196, 69], [196, 89], [-244, 138], [244, 158]],
+  escort: [[0, 0], [-67, 65], [67, 65], [-132, 145], [132, 145], [0, 183]],
+  cargo: [[0, 92], [-76, 0], [76, 0], [-134, 67], [134, 67], [-135, 146], [135, 146]],
+  arc: [[-54, 0], [54, 0], [-110, 36], [110, 36], [-167, 72], [167, 72], [-210, 110], [210, 110]],
+  flank: [[-204, 0], [204, 0], [-244, 47], [244, 47], [-275, 95], [275, 95], [-170, 140], [170, 140]],
+};
+export class StageDirector {
+  constructor(random) {
+    this.random = random;
+    this.sector = 0;
+  }
+  update(session, spawn, events, fieldClear = false, activeCount = 0) {
+    const sector = session.stage;
+    const map = CAMPAIGN[session.sector - 1];
+    const now = session.elapsedMs - session.stageStartedAt;
+    if (this.sector !== sector) {
+      this.sector = sector;
+      this.wave = -1;
+      this.bossArrived = false;
+      this.flagshipArrived = false;
+    }
+    if (now >= BOSS_ARRIVAL_MS) {
+      if (this.bossArrived) return null;
+      this.bossArrived = true;
+      session.warpDashMs = 1500;
+      events.push({ type: "boss", id: map.boss, label: map.bossName, stage: sector });
+      if (sector > 1) events.push({ type: "wave", label: `${map.bossName}接近中` });
+      if (session.mode === "endless" && session.loop >= 3) {
+        spawn("elite_fighter", 170, -60, { flagship: true, summoned: true });
+        spawn("elite_fighter", 550, -60, { flagship: true, summoned: true });
+      }
+      return spawn(map.boss, 360, -106);
+    }
+    if (now >= WAVE_COUNT * WAVE_MS) return null;
+    const wave = Math.floor(now / WAVE_MS);
+    const [label, layout, roster] = map.waves[wave];
+    if (wave !== this.wave) {
+      this.wave = wave;
+      this.group = 0;
+      this.next = wave * WAVE_MS + (wave > 0 && wave % 2 === 0 ? 1500 : 480);
+      session.wave = wave + 1;
+
+第九空域游戏软件 V1.0                                      第 20 页 / 共 60 页
+==============================================================================
+      if (wave > 0 && wave % 2 === 0) {
+        session.warpDashMs = 1500;
+        events.push({ type: "warp", stage: sector });
+      }
+      events.push({ type: "wave", label: wave === 0 ? `${map.name} · ${label}` : label });
+    }
+    if (!this.flagshipArrived && now >= 2 * WAVE_MS + 1500) {
+      this.flagshipArrived = true;
+      if (session.mode === "endless" && session.loop >= 2) {
+        spawn(map.flagship, 220, -62, { flagship: true });
+        spawn(map.flagship, 500, -62, { flagship: true });
+      } else {
+        spawn(map.flagship, 360, -62, { flagship: true });
+      }
+      events.push({ type: "wave", label: "中段精英旗舰接近中" });
+    }
+    if (now % WAVE_MS > 7530) return null;
+    if (fieldClear && this.group > 0 && this.next - now > 320) this.next = now + 320;
+    if (now < this.next) return null;
+    if (activeCount >= MAX_ACTIVE_ENEMIES) {
+      this.next = now + 400;
+      return null;
+    }
+    const formation = wave === 4 && this.group % 2 === 1 ? (layout === "flank" ? "cross" : "flank") : layout;
+    const offsets = LAYOUTS[formation];
+    const center = this.group === 0 ? 360 : 360 + (this.random() - 0.5) * (["cross", "flank"].includes(layout) ? 66 : 194);
+    const length = Math.min(offsets.length, wave === 4 ? 8 : 6 + Number(session.sector > 1), MAX_ACTIVE_ENEMIES - activeCount);
+    const loop = session.loop;
+    const endlessHorde = session.mode === "endless" && loop >= 2;
+    const eliteChance = endlessHorde ? (loop === 2 ? 0.35 : 0.5) : 0;
+    const aceChance = (endlessHorde || (session.hardcore && wave >= 2)) ? 0.22 : 0;
+    for (let index = 0; index < length; index++) {
+      const [dx, dy] = offsets[index];
+      const x = Math.max(40, Math.min(680, center + dx));
+      const bounty = layout === "cargo" && index === 0 && this.group === 0;
+      const lead = index === 0 && (layout === "escort" || bounty);
+      let id = roster[lead ? 0 : (index + this.group) % roster.length];
+      if (!lead && id === "medium_transport") id = roster[1];
+      if (!lead && !bounty && endlessHorde && this.random() < eliteChance) {
+        id = ELITES[Math.floor(this.random() * ELITES.length)];
+      }
+      const isHeavy = !id.startsWith("normal_") && id !== "medium_transport";
+      const ace = !bounty && isHeavy && this.random() < aceChance ? ACES[Math.floor(this.random() * ACES.length)] : null;
+      spawn(id, x, -40 - dy, { side: Math.sign(dx), formation, bounty, opening: wave === 0, ace });
+      if (bounty) events.push({ type: "bounty-start", durationMs: 8000 });
+    }
+    if (endlessHorde) {
+      const flankOffsets = LAYOUTS[formation === "flank" ? "cross" : "flank"];
+      const extraCount = Math.min(loop === 2 ? 5 : 8, flankOffsets.length, Math.max(0, MAX_ACTIVE_ENEMIES - activeCount - length));
+      for (let i = 0; i < extraCount; i++) {
+        const [dx, dy] = flankOffsets[i];
+        const x = Math.max(40, Math.min(680, 360 + dx));
+
+第九空域游戏软件 V1.0                                      第 21 页 / 共 60 页
+==============================================================================
+        const id = this.random() < eliteChance
+          ? ELITES[Math.floor(this.random() * ELITES.length)]
+          : roster[(i + this.group + 1) % roster.length];
+        const safeId = id === "medium_transport" ? roster[1] : id;
+        const isHeavy = !safeId.startsWith("normal_");
+        const ace = isHeavy && this.random() < aceChance ? ACES[Math.floor(this.random() * ACES.length)] : null;
+        spawn(safeId, x, -120 - dy, { side: Math.sign(dx), formation: "flank", ace });
+      }
+    }
+    if (this.group === 0 && session.mutator?.id === "elite-swarm") {
+      const elite = ELITES[Math.floor(this.random() * ELITES.length)];
+      spawn(elite, 360, -210, { formation });
+    }
+    this.group++;
+    const baseInterval = (layout === "cargo" ? 2360 : wave === 4 ? 1420 : 1840) - (session.sector - 1) * 80;
+    const intervalScale = endlessHorde ? (loop === 2 ? 0.76 : Math.max(0.55, 0.72 - (loop - 3) * 0.05)) : 1;
+    this.next = now + Math.max(720, Math.round(baseInterval * intervalScale));
+    return null;
+  }
+}
+export const BOSS_HARDPOINTS = {
+  boss_marshal: [
+    { id: "left", label: "左翼炮", x: 37, y: 50, radius: 25, hp: 240, cut: [26, 46] },
+    { id: "right", label: "右翼炮", x: 112, y: 50, radius: 25, hp: 240, cut: [26, 46] },
+    { id: "core", label: "中央核心", x: 74, y: 49, radius: 36 },
+  ],
+  boss_citadel: [
+    { id: "left", label: "左肩重炮", x: 36, y: 31, radius: 27, hp: 340, cut: [30, 54] },
+    { id: "right", label: "右肩重炮", x: 109, y: 31, radius: 27, hp: 340, cut: [30, 54] },
+    { id: "core", label: "要塞能源核心", x: 72, y: 58, radius: 36 },
+  ],
+  boss_overmind: [
+    { id: "left", label: "左孵化舱", x: 37, y: 47, radius: 25, hp: 460, cut: [39, 48] },
+    { id: "right", label: "右孵化舱", x: 126, y: 47, radius: 25, hp: 460, cut: [39, 48] },
+    { id: "core", label: "主脑核心", x: 81, y: 46, radius: 39 },
+  ],
+};
+export function createBossParts({ id, width, height }, scale, coreHp, hpScale = 1) {
+  return BOSS_HARDPOINTS[id].map(({ x, y, hp, cut, ...part }) => {
+    const maxHp = hp === undefined ? coreHp : Math.round(hp * hpScale);
+    return { ...part, dx: (x - width / 2) * scale, dy: (y - height / 2) * scale, hp: maxHp, maxHp };
+  });
+}
+import { MODULE, SECONDARIES } from "./upgrade-cards.js";
+const FROST_SPIKES = [-0.85, 0, 0.85];
+const BLADE_DAMAGE = 22;
+const COMBO_RATES = [1, 1.08, 1.15, 1.22];
+export class SoloWeapons {
+  constructor(combat) {
+    this.combat = combat;
+    this.nextShot = 0;
+    this.secondaryTimers = {};
+
+第九空域游戏软件 V1.0                                      第 22 页 / 共 60 页
+==============================================================================
+    this.drones = [];
+    this.fields = [];
+    this.blades = [];
+    this.streak = 0;
+    this.streakUntil = 0;
+    this.nextResonance = 0;
+    this.nextGuardPulse = 0;
+    this.volleys = 0;
+  }
+  update(dt) {
+    const { session: s } = this.combat;
+    const { fighter, elapsedMs: now, build } = s;
+    if (now >= this.nextShot) {
+      const streak = fighter.weapon === "pulse" && this.streakUntil > now ? this.streak : 0;
+      const frenzy = s.combo >= 10 ? (build.secondary[MODULE.frenzy] ?? 0) : 0;
+      const rate = (1 + Math.min(0.35, streak * 0.05) + (build.synergy ? 0.13 : 0)) * (frenzy ? 1.2 : 1)
+        * COMBO_RATES[s.comboTier] * (s.feverUntil > now ? 1.25 : 1) * (s.bloodUntil > now ? 1.35 : 1);
+      this.nextShot = now + fighter.interval / rate;
+      this.#fireMain(frenzy);
+    }
+    this.#secondary();
+    this.#drones(dt);
+    this.#fields(dt);
+  }
+  clearStageEffects() {
+    this.fields.length = 0;
+    this.blades.length = 0;
+    for (const drone of this.drones) drone.target = null;
+  }
+  counterGraze(shot) {
+    const { session: s } = this.combat;
+    const rank = s.build.secondary[MODULE.counter];
+    if (!rank) return;
+    const { x, y } = s.ship;
+    this.launch(x, y - 10, shot.x < x ? -0.32 : 0.32, 18 + rank * 6, {
+      kind: "missile", color: 0x33ddcc, speed: 920, homing: true, payload: "counter",
+    });
+  }
+  #fireMain(frenzy) {
+    const { session: s, events } = this.combat;
+    const { fighter, build, ship, elapsedMs } = s;
+    const rank = build.main;
+    const powered = Boolean(build.synergy);
+    const barrels = fighter.barrels.map(([x, angle]) => [x, angle, 1]);
+    switch (fighter.weapon) {
+      case "lance":
+        if (rank >= 2) barrels.push([-26, -0.015, 0.28], [26, 0.015, 0.28]);
+        break;
+      case "pulse":
+        if (rank >= 2) barrels.push([-26, -0.022, 0.35], [26, 0.022, 0.35]);
+        break;
+      case "arc":
+
+第九空域游戏软件 V1.0                                      第 23 页 / 共 60 页
+==============================================================================
+      case "bio":
+        if (rank >= 2) barrels.push([-22, -0.09, 0.33], [22, 0.09, 0.33]);
+        break;
+      case "rocket":
+        if (rank >= 3) barrels.push([-25, -0.045, 0.39], [25, 0.045, 0.39]);
+        break;
+      case "void":
+        if (rank >= 3) barrels.push([-24, -0.06, 0.37], [24, 0.06, 0.37]);
+        break;
+      case "ice":
+        if (rank >= 2) barrels.push([-24, -0.14, 0.52], [24, 0.14, 0.52]);
+        break;
+      case "guard":
+        if (rank >= 3) barrels.push([-38, -0.026, 0.45], [38, 0.026, 0.45]);
+        break;
+      case "needle":
+        if (powered) barrels.push([-21, -0.045, 0.46], [21, 0.045, 0.46]);
+        break;
+    }
+    const rage = s.rageUntil > elapsedMs ? 1.3 : 1;
+    const guarded = s.guard ? 1.2 : 1;
+    const boost = 1 + 0.12 * Math.min(2, rank - 1) + 0.065 * Math.max(0, rank - 3);
+    this.volleys++;
+    const critical = Boolean(frenzy && this.volleys % 4 === 0);
+    const damage = fighter.damage * boost * rage * guarded * (powered ? 1.24 : 1)
+      * (critical ? 1.42 + Math.min(0.3, frenzy * 0.08) : 1);
+    const prism = build.secondary[MODULE.prism];
+    if (prism && this.volleys % 4 === 0) {
+      const angle = Math.PI / 15;
+      const damageScale = Math.min(0.7, 0.32 + prism * 0.07);
+      barrels.push([-12, -angle, damageScale], [12, angle, damageScale]);
+    }
+    const pierce = fighter.pierce ? fighter.pierce + Number(rank >= 2) + Number(powered)
+      : Number(powered && fighter.weapon === "ice");
+    for (const [offset, angle, power] of barrels) {
+      const x = ship.x + offset;
+      const y = ship.y - 29 + Math.abs(offset) * 0.27;
+      this.launch(x, y, angle, damage * power, {
+        kind: fighter.weapon, color: fighter.color, speed: fighter.speed, rank, powered,
+        width: fighter.width ? fighter.width + (rank - 1) * 5 : 5,
+        pierce: pierce + Number(Boolean(frenzy)), critical,
+      });
+      events.push({ type: "muzzle", x, y, color: fighter.color, kind: fighter.weapon,
+        charged: fighter.weapon === "pulse" && this.streakUntil > elapsedMs && this.streak >= 7,
+        heavy: fighter.audio === "heavy", cue: fighter.audio });
+    }
+  }
+  launch(x, y, angle, damage, options) {
+    const { speed = 975, pierce = 0 } = options;
+    this.combat.shots.push({
+      ...options, x, y, vx: Math.sin(angle) * speed, vy: -Math.cos(angle) * speed,
+      damage, pierce, hit: pierce ? new Set() : null,
+
+第九空域游戏软件 V1.0                                      第 24 页 / 共 60 页
+==============================================================================
+    });
+  }
+  #secondary() {
+    const { session: s, events } = this.combat;
+    const { ship, build, elapsedMs: now } = s;
+    this.blades.length = 0;
+    for (const { id } of SECONDARIES) {
+      const rank = build.secondary[id];
+      if (!rank) continue;
+      const strength = 1 + (rank - 1) * 0.24 + (build.synergy?.secondary === id ? 0.4 : 0);
+      if (id === "blade") this.#orbitBlades();
+      if ((this.secondaryTimers[id] ?? 0) > now) continue;
+      const target = this.#target(ship, 490);
+      if (id === "relay" && target) {
+        events.push({ type: "arc", points: [{ x: ship.x, y: ship.y }, target], color: 0x33ddcc });
+        this.combat.strikeAreaTarget(target, 22 * strength);
+        this.#arc(target, strength * 20, 151, 2, 0x33ddcc);
+      } else if (id === "blade") {
+        for (const blade of this.blades) {
+          for (const enemy of this.combat.targetsNear(blade, blade.radius)) this.combat.strikeAreaTarget(enemy, BLADE_DAMAGE * strength);
+        }
+      } else if (id === "missile") {
+        this.launch(ship.x - 20, ship.y, -0.22, 26 * strength, { kind: "missile", color: 0x33ddcc, speed: 700, homing: true });
+        this.launch(ship.x + 20, ship.y, 0.22, 26 * strength, { kind: "missile", color: 0x33ddcc, speed: 700, homing: true });
+      } else if (id === "bomb" || id === "gun") {
+        const bomb = id === "bomb";
+        for (const side of [-1, 1]) {
+          this.launch(ship.x + side * 27, ship.y - 16, side * 0.046, (bomb ? 27 : 13) * strength,
+            { kind: bomb ? "bomb" : "aux", color: bomb ? 0xffd13b : 0xffffff, speed: bomb ? 825 : 1130 });
+        }
+      }
+      this.secondaryTimers[id] = now + ({ missile: 930, blade: 205, relay: 865, bomb: 840, gun: 420 })[id] * (s.comboTier >= 2 ? 0.85 : 1);
+    }
+  }
+  #orbitBlades() {
+    const { session: s, events } = this.combat;
+    const { ship, elapsedMs: now } = s;
+    const domain = s.fighter.weapon === "guard" && s.guard && s.build.synergy?.secondary === "blade";
+    for (const offset of [0, Math.PI]) {
+      const angle = now * 0.005 + offset;
+      this.blades.push({
+        x: ship.x + Math.cos(angle) * (domain ? 147 : 105),
+        y: ship.y + Math.sin(angle) * (domain ? 111 : 77),
+        angle, radius: domain ? 64 : 35,
+      });
+    }
+    if (domain && now >= this.nextGuardPulse) {
+      const radius = 182;
+      this.nextGuardPulse = now + 920 * (s.comboTier >= 2 ? 0.85 : 1);
+      this.combat.clearShotsNear(ship, radius);
+      events.push({ type: "reflect", x: ship.x, y: ship.y, color: 0xe7f2ff, radius });
+    }
+
+第九空域游戏软件 V1.0                                      第 25 页 / 共 60 页
+==============================================================================
+  }
+  #target(origin, radius, preferWeak = false) {
+    let best = null;
+    let score = Infinity;
+    for (const enemy of this.combat.enemies) {
+      if (enemy.hp <= 0 || enemy.y < 20 || enemy.y > origin.y + 25) continue;
+      const d = Math.hypot(enemy.x - origin.x, enemy.y - origin.y);
+      if (d > radius) continue;
+      const weight = preferWeak ? d + enemy.hp / enemy.maxHp * 235 : d;
+      if (weight < score) {
+        best = enemy;
+        score = weight;
+      }
+    }
+    return best;
+  }
+  #drones(dt) {
+    const { session: s, events } = this.combat;
+    if (s.fighter.weapon !== "needle") return;
+    const { ship, elapsedMs: now, build } = s;
+    const count = Math.min(6, 2 + (build.main - 1) * 2);
+    for (let i = 0; i < count; i++) {
+      const side = i % 2 ? 1 : -1;
+      const rank = Math.floor(i / 2);
+      const orbitX = ship.x + side * (48 + rank * 25 + Math.sin(now * 0.006 + i) * 10);
+      const orbitY = ship.y + 18 - rank * 28 + Math.sin(now * 0.005 + i) * 11;
+      const drone = this.drones[i] ??= { x: orbitX, y: orbitY, next: i * 83 + 235 };
+      const target = this.#target(drone, 665, true);
+      drone.target = target;
+      const reach = target ? Math.min(172 + rank * 12, Math.max(0, ship.y - target.y - 35)) : 0;
+      const advanceX = target ? Math.max(-95, Math.min(95, (target.x - ship.x) * 0.38)) : 0;
+      const ease = Math.min(1, dt * 5);
+      drone.x += (orbitX + advanceX - drone.x) * ease;
+      drone.y += (orbitY - reach - drone.y) * ease;
+      if (!target || now < drone.next) continue;
+      const angle = Math.atan2(target.x - drone.x, drone.y - target.y);
+      const power = (count === 2 ? 21.4 : count === 4 ? 14.4 : 12.1) * (1 + Math.max(0, build.main - 3) * 0.06);
+      const diving = target.category !== "boss" && target.hp <= power * 1.7 && Math.hypot(target.x - drone.x, target.y - drone.y) < 300;
+      const color = s.fighter.color;
+      this.launch(drone.x, drone.y - 7, angle, power * (diving ? 1.55 : 1), {
+        kind: diving ? "missile" : "drone", color, speed: diving ? 1180 : 1270, homing: true, powered: Boolean(build.synergy),
+      });
+      if (diving) {
+        drone.x += (target.x - drone.x) * 0.33;
+        drone.y += (target.y - drone.y) * 0.33;
+      }
+      drone.next = now + ((build.synergy ? 500 : 635) + i * 12) * (s.comboTier >= 2 ? 0.85 : 1);
+      events.push({ type: "muzzle", x: drone.x, y: drone.y - 6, color, cue: "drone" });
+    }
+  }
+  steerShot(shot, seconds) {
+    if (!shot.homing) return;
+
+第九空域游戏软件 V1.0                                      第 26 页 / 共 60 页
+==============================================================================
+    if (!shot.target || shot.target.hp <= 0) shot.target = this.#target(shot, 742, shot.kind === "drone");
+    if (!shot.target) return;
+    const { target, speed } = shot;
+    const dy = shot.y - target.y;
+    const angle = Math.atan2(target.x - shot.x, dy);
+    const turn = Math.min(1, seconds * (shot.kind === "drone" ? 16 : 7));
+    shot.vx += (Math.sin(angle) * speed - shot.vx) * turn;
+    shot.vy += (-Math.cos(angle) * speed - shot.vy) * turn;
+  }
+  damageFor(shot, enemy) {
+    const s = this.combat.session;
+    let damage = shot.damage;
+    if (shot.kind === "lance" && (enemy.category === "elite" || enemy.category === "boss")) damage *= 1.2;
+    if (shot.kind === "ice" && enemy.frozenUntil > s.elapsedMs && !(enemy === this.combat.boss && this.combat.bossShielded)) damage *= 2;
+    if (shot.kind === "rocket") damage *= 1 + this.combat.targetsNear(shot, 102 + 10 * (shot.rank - 1), enemy).length * 0.1;
+    return damage;
+  }
+  impact(shot, enemy, part) {
+    const { combat } = this;
+    const { session: s, events } = combat;
+    const now = s.elapsedMs;
+    const { kind, color } = shot;
+    if (shot.critical) events.push({ type: "mechanism", label: "连杀暴击", x: shot.x, y: shot.y, color });
+    if (kind === "pulse") {
+      this.streak = (this.streakUntil > now ? this.streak : 0) + (shot.rank > 1 ? 2 : 1);
+      this.streakUntil = now + 900;
+      if (shot.powered && now >= this.nextResonance) {
+        this.nextResonance = now + 210;
+        this.#arc(enemy, shot.damage * 0.72, 140, 2, 0x9eceff);
+      }
+    }
+    if (kind === "lance" && shot.powered && now >= this.nextResonance) {
+      this.nextResonance = now + 180;
+      this.blast(shot, combat.targetsNear(shot, 93, enemy), 72, shot.damage * 0.42, 0xff3355, null, false, "lance");
+    }
+    if (kind === "arc") {
+      enemy.shockedUntil = now + 1100;
+      const jumps = this.#arc(enemy, shot.damage * (shot.powered ? 0.71 : 0.54),
+        143 + 24 * (shot.rank - 1), shot.powered ? 6 : 3, color);
+      if (shot.powered) {
+        const center = { x: shot.x, y: shot.y };
+        events.push({ type: "arc", points: [{ x: shot.x - 24, y: Math.max(0, shot.y - 135) }, center], color });
+        this.blast(center, combat.targetsNear(center, 110), 110, shot.damage * 0.32, color, "九霄天雷");
+      }
+      if (!jumps && enemy === combat.boss) {
+        const nodes = combat.bossTargets().filter((node) => node.part !== part);
+        events.push({ type: "arc", points: [shot, ...nodes, { x: enemy.x, y: enemy.y - 31 }], color });
+        if (nodes.length) combat.strikeAreaTarget(enemy, shot.damage * 0.32, nodes[0].part);
+      }
+    }
+    if (kind === "rocket" || kind === "bomb" || kind === "missile") {
+      const rank = shot.rank ?? 1;
+
+第九空域游戏软件 V1.0                                      第 27 页 / 共 60 页
+==============================================================================
+      const radius = kind === "rocket" ? 102 + 10 * (rank - 1) : shot.payload === "corona" ? 91 : 66;
+      const list = combat.targetsNear(shot, radius, enemy);
+      this.blast(shot, list, radius, shot.damage * 0.6 * (1 + 0.1 * list.length), color, null, kind === "rocket", kind);
+      if (kind === "rocket" && rank >= 2) {
+        for (const spread of [-0.63, 0.63]) {
+          const options = shot.powered
+            ? { kind: "missile", color, speed: 800, homing: true, powered: true, payload: "corona" }
+            : { kind: "ember", color, speed: 765 };
+          this.launch(shot.x, shot.y - 17, spread, shot.damage * (shot.powered ? 0.36 : 0.25), options);
+        }
+      }
+      if (kind === "rocket" && enemy.hp <= 0) this.blast(enemy, combat.targetsNear(enemy, 78, enemy), 78, shot.damage * 0.35, color, null, false, kind);
+    }
+    if (kind === "void") {
+      this.fields.push({
+        x: shot.x, y: shot.y, color, age: 0, tick: 0, damage: shot.damage, attracted: new Set(),
+        radius: (shot.rank >= 2 ? 138 : 78) * (shot.powered ? 1.23 : 1), powered: shot.powered,
+      });
+      if (this.fields.length > 18) this.fields.shift();
+    }
+    if (kind === "ice") {
+      if (enemy.frozenUntil > now) {
+        const multipliers = shot.powered ? [-1.05, ...FROST_SPIKES, 1.05] : FROST_SPIKES;
+        enemy.frozenUntil = 0;
+        enemy.ice = 0;
+        events.push({ type: "mechanism", label: "碎冰 ×2.0!", x: shot.x, y: shot.y, color },
+          { type: "ice-shatter", x: shot.x, y: shot.y, color });
+        for (const angle of multipliers) {
+          this.launch(shot.x, shot.y, angle, shot.damage * 0.55, { kind: "shard", color, speed: 790, exclude: enemy });
+        }
+      } else {
+        enemy.ice = (enemy.icedUntil > now ? enemy.ice : 0) + 1;
+        enemy.icedUntil = now + 1550;
+        if (enemy.ice >= 4) {
+          enemy.frozenUntil = now + 1500;
+          events.push({ type: "mechanism", label: "冻结", x: enemy.x, y: enemy.y, color });
+        }
+      }
+    }
+  }
+  #arc(origin, damage, radius, limit, color) {
+    const { combat } = this;
+    const visited = [origin];
+    let node = origin;
+    for (let i = 0; i < limit; i++) {
+      const target = combat.targetsNear(node, radius).find((enemy) => !visited.includes(enemy));
+      if (!target) break;
+      visited.push(target);
+      combat.strikeAreaTarget(target, damage);
+      target.shockedUntil = combat.session.elapsedMs + 1100;
+      node = target;
+    }
+
+第九空域游戏软件 V1.0                                      第 28 页 / 共 60 页
+==============================================================================
+    if (visited.length > 1) {
+      combat.events.push({ type: "arc", points: visited.map(({ x, y }) => ({ x, y })), color });
+      combat.events.push({ type: "mechanism", label: "闪电链", x: origin.x, y: origin.y, color });
+    }
+    return visited.length - 1;
+  }
+  blast(origin, targets, radius, damage, color, label, ignite = false, kind = "blast") {
+    const { x, y } = origin;
+    this.combat.events.push({ type: "blast", x, y, radius, color, kind });
+    if (label) this.combat.events.push({ type: "mechanism", x, y, color, label });
+    for (const enemy of targets) {
+      if (enemy.hp <= 0) continue;
+      this.combat.strikeAreaTarget(enemy, damage);
+      if (ignite && enemy.hp <= 0) {
+        this.blast(enemy, this.combat.targetsNear(enemy, 78, enemy), 78, damage * 0.43, color, null, false, kind);
+      }
+    }
+  }
+  #fields(dt) {
+    this.fields = this.fields.filter((field) => {
+      field.age += dt;
+      const targets = this.combat.targetsNear(field, field.radius);
+      for (const enemy of targets) {
+        field.attracted.add(enemy);
+        if (enemy.category === "boss") continue;
+        const pull = Math.min(0.25, dt * 3.2);
+        enemy.x += (field.x - enemy.x) * pull;
+        enemy.y += (field.y - enemy.y) * pull;
+      }
+      if (field.age >= 1.2) {
+        const damage = field.damage * ((field.powered ? 0.74 : 0.53) + Math.min(8, field.attracted.size) * 0.12);
+        this.blast(field, targets, field.radius, damage, field.color, "黑洞坍缩!", false, "void");
+        return false;
+      }
+      if (field.age >= field.tick) {
+        field.tick += 0.24;
+        for (const enemy of targets) this.combat.strikeAreaTarget(enemy, field.damage * 0.14);
+      }
+      return true;
+    });
+  }
+}
+export const SECONDARIES = [
+  { id: "missile", label: "追踪导弹", detail: "搜寻战场目标，命中炸开小范围火球", mark: "⌃" },
+  { id: "blade", label: "环绕光刃", detail: "两道轨道光刃切割靠近战机的敌舰", mark: "◈" },
+  { id: "relay", label: "连锁电弧", detail: "周期放电，闪电跳向附近敌舰", mark: "ϟ" },
+  { id: "bomb", label: "爆破副炮", detail: "交错发射两枚有范围杀伤的高爆弹", mark: "✧" },
+  { id: "gun", label: "辅助机枪", detail: "在主炮两侧补上一组高速子弹", mark: "≋" },
+];
+export const MODULE = {
+  counter: "擦弹反击飞弹",
+  prism: "棱镜分裂",
+
+第九空域游戏软件 V1.0                                      第 29 页 / 共 60 页
+==============================================================================
+  frenzy: "狂热连杀",
+  emergency: "应急电容",
+  magnet: "磁力超频",
+};
+export const CONTRACT = {
+  glass: "玻璃大炮协议",
+  blood: "血怒转换器",
+  eater: "弹幕吞噬者",
+};
+const CONTRACT_CARDS = [
+  { id: CONTRACT.glass, detail: "全武器伤害 +45%，最大生命与当前生命同比减少 20%", mark: "◆" },
+  { id: CONTRACT.blood, detail: "实际损失生命时将超载充满，同时获得 2 秒狂暴射速", mark: "ϟ" },
+  { id: CONTRACT.eater, detail: "擦弹半径 +45%，每擦弹 10 次清除近身弹幕并回复 6 点护盾", mark: "⌾" },
+];
+const TACTICAL_CARDS = [
+  { id: MODULE.counter, detail: "每次擦弹额外发射一枚追踪微弹，再装提高飞弹伤害", mark: "⌃" },
+  { id: MODULE.prism, detail: "每第四轮主炮增加左右各 12° 的副弹，再装提高副弹伤害", mark: "◇" },
+  { id: MODULE.frenzy, detail: "十连杀时攻速 +20%，主炮穿透 +1 并周期暴击，再装提高暴击伤害", mark: "»" },
+  { id: MODULE.emergency, detail: "受伤无敌结束时释放近身清弹波并恢复护盾，再装扩大范围和回复", mark: "ϟ" },
+  { id: MODULE.magnet, detail: "拾取半径扩大 50 像素，过载充能 +22%，再装继续扩大拾取半径", mark: "⌾" },
+];
+export const SYNERGIES = {
+  lance: { secondary: "bomb", name: "赤刃裂星炮" },
+  pulse: { secondary: "relay", name: "高频雷暴矩阵" },
+  arc: { secondary: "relay", name: "九霄天雷" },
+  bio: { secondary: "blade", name: "永动圣盾脉冲" },
+  rocket: { secondary: "missile", name: "日冕集束" },
+  void: { secondary: "bomb", name: "重力核爆" },
+  ice: { secondary: "gun", name: "碎冰穿甲巨枪" },
+  guard: { secondary: "blade", name: "圣盾审判域" },
+  needle: { secondary: "missile", name: "制导机海" },
+};
+export function drawCards(session, random) {
+  const { fighter, build } = session;
+  const [label, detail] = fighter.upgrade;
+  const synergy = SYNERGIES[fighter.weapon];
+  let secondary = SECONDARIES[Math.floor(random() * SECONDARIES.length)];
+  if (synergy && !build.synergy && !build.secondary[synergy.secondary] && (build.main >= 3 || session.level % 3 === 0)) {
+    secondary = SECONDARIES.find(({ id }) => id === synergy.secondary);
+  }
+  const unowned = TACTICAL_CARDS.filter(({ id }) => !build.secondary[id]);
+  const tacticalPool = unowned.length ? unowned : TACTICAL_CARDS;
+  const contracts = CONTRACT_CARDS.filter(({ id }) => !build.secondary[id]);
+  const overclock = session.level % 3 === 0 && contracts.length > 0 && random() < 0.35;
+  const pool = overclock ? contracts : tacticalPool;
+  const tactical = pool[Math.floor(random() * pool.length)];
+  return [
+    { id: "main", label, detail: build.main >= 3 ? detail + "，继续强化主炮" : detail, mark: "◆", kind: "专属", level: build.main + 1 },
+    { ...secondary, kind: "副武", level: (build.secondary[secondary.id] ?? 0) + 1, resonance: synergy?.secondary === secondary.id ? synergy.name : null },
+    { ...tactical, label: tactical.id, kind: overclock ? "超频" : "通用", level: (build.secondary[tactical.id] ?? 0) + 1 },
+  ];
+}
+
+第九空域游戏软件 V1.0                                      第 30 页 / 共 60 页
+==============================================================================
+export function applyCard(session, card) {
+  const { build } = session;
+  if (card.id === "main") build.main++;
+  else if (card.kind === "超频") {
+    if (!build.secondary[card.id]) {
+      build.secondary[card.id] = 1;
+      if (card.id === CONTRACT.glass) {
+        const maxHp = Math.max(1, Math.floor(session.maxHp * 0.8));
+        session.hp = Math.max(1, session.hp * maxHp / session.maxHp);
+        session.maxHp = maxHp;
+      }
+    }
+  } else build.secondary[card.id] = (build.secondary[card.id] ?? 0) + 1;
+  const synergy = SYNERGIES[session.fighter.weapon];
+  if (!build.synergy && synergy && build.main >= 3 && build.secondary[synergy.secondary]) {
+    build.synergy = synergy;
+    session.addShield(30);
+    return synergy.name;
+  }
+  return null;
+}
+export const FIGHTERS = {
+  "01_chifeng": {
+    weapon: "lance", color: 0xff3355, audio: "heavy", hp: 112, interval: 310, damage: 67, speed: 1140,
+    barrels: [[0, 0]], pierce: 2, engine: [17, 31],
+    upgrade: ["赤刃分锋", "增加两道穿甲副锋，主弹穿透额外目标"],
+    overload: { name: "赤刃穿云", color: 0xff3355, count: 3, spread: 0.12, damage: 130, piercing: true },
+  },
+  "02_jifeng": {
+    weapon: "pulse", color: 0x38bdf8, audio: "pulse", hp: 105, move: 1.18, interval: 148, damage: 12.2, speed: 1170,
+    barrels: [[-12, 0], [12, 0]], engine: [15, 32],
+    upgrade: ["超音速阵列", "双联变四联，命中时更快叠满射速"],
+    overload: { name: "疾风齐射", color: 0x38bdf8, count: 7, spread: 0.09, damage: 102 },
+  },
+  "03_leiting": {
+    weapon: "arc", color: 0xffd13b, audio: "arc", hp: 106, interval: 265, damage: 39, speed: 985,
+    barrels: [[0, 0]], engine: [13, 34],
+    upgrade: ["暴雷分流", "追加斜向电弧弹，扩大闪电链覆盖范围"],
+    overload: { name: "雷霆万钧", color: 0xffd13b, count: 5, spread: 0.15, damage: 115 },
+  },
+  "04_fusu": {
+    weapon: "bio", color: 0x22ee88, audio: "laser", hp: 105, interval: 205, damage: 21.6, speed: 950,
+    barrels: [[-15, 0], [15, 0]], engine: [20, 34],
+    upgrade: ["生体莲华", "双发外侧分裂出能量芽，延长满血狂战"],
+    overload: { name: "生机涌动", color: 0x22ee88, count: 5, spread: 0.13, damage: 94, heal: 28 },
+  },
+  "05_lieyang": {
+    weapon: "rocket", color: 0xff7a22, audio: "heavy", hp: 112, interval: 310, damage: 60, speed: 835,
+    barrels: [[0, 0]], engine: [32, 33],
+    upgrade: ["子母烈阳", "火箭爆心炸出两枚斜向子弹，溅射范围扩大"],
+    overload: { name: "烈阳新星", color: 0xff7a22, count: 9, spread: 0.13, damage: 141 },
+  },
+
+第九空域游戏软件 V1.0                                      第 31 页 / 共 60 页
+==============================================================================
+      g.fillStyle(GOLD, 0.92);
+      for (const dx of [-1, 1]) {
+        for (const dy of [-1, 1]) {
+          this.#pixel(g, target.x + dx * (span - 4), target.y + dy * span, 11, 2);
+          this.#pixel(g, target.x + dx * span, target.y + dy * (span - 4), 2, 11);
+        }
+      }
+    }
+  }
+  #emitTrail(x, y, vx, vy, color, size = 4, life = 150) {
+    if (this.trails.length >= 220) this.trails.shift();
+    this.trails.push({ x, y, vx, vy, color, size, life, maxLife: life });
+  }
+  #drawTrails(dtMs) {
+    const g = this.bullets;
+    const glow = this.bulletGlow;
+    const dt = dtMs / 1000;
+    this.trails = this.trails.filter((p) => {
+      p.life -= dtMs;
+      if (p.life <= 0) return false;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      const t = p.life / p.maxLife;
+      glow.fillStyle(p.color, t * 0.42);
+      this.#pixel(glow, p.x, p.y, p.size * 2.1 * t + 2);
+      g.fillStyle(t > 0.65 ? WHITE : p.color, t * 0.92);
+      this.#pixel(g, p.x, p.y, Math.max(2, p.size * t));
+      return true;
+    });
+  }
+  #drawFields(weapons, now) {
+    const g = this.ground;
+    for (const field of weapons.fields) {
+      const radius = field.radius * (0.36 + 0.48 * Math.min(1, field.age * 4));
+      this.bulletGlow.fillStyle(VIOLET, 0.10).fillCircle(field.x, field.y, radius);
+      g.fillStyle(0x1b1035, 0.9).fillCircle(field.x, field.y, radius * 0.31);
+      pixelRing(g, field.x, field.y, radius * 0.35, VIOLET, 0.7, 2);
+      for (let i = 0; i < 24; i++) {
+        const progress = (field.age * 2.4 + (i % 12) / 12) % 1;
+        const spin = progress * 8 - now * 0.004 + (i >= 12 ? Math.PI : 0);
+        const arm = radius * (0.32 + 0.68 * (1 - progress));
+        const x = field.x + Math.cos(spin) * arm;
+        const y = field.y + Math.sin(spin) * arm * 0.74;
+        g.fillStyle(i % 4 === 0 ? WHITE : VIOLET, 0.46 + progress * 0.37);
+        this.#pixel(g, x, y, 2 + progress * 3, 2 + progress * 3);
+      }
+    }
+    for (const blade of weapons.blades) {
+      const { x, y, angle } = blade;
+      g.lineStyle(8, 0x74f4b4, 0.31).beginPath().arc(x, y, 18, angle, angle + 2.5).strokePath();
+      g.lineStyle(3, 0xc7ffe4, 0.91).beginPath().arc(x, y, 17, angle + 0.15, angle + 2.15).strokePath();
+    }
+
+第九空域游戏软件 V1.0                                      第 32 页 / 共 60 页
+==============================================================================
+  }
+  #drawShots(combat) {
+    const g = this.bullets;
+    const glow = this.bulletGlow;
+    const now = combat.session.elapsedMs;
+    const spawnTrails = now >= this.nextTrail;
+    if (spawnTrails) this.nextTrail = now + 26;
+    for (const shot of combat.shots) this.#playerShot(shot, now, spawnTrails);
+    for (const shot of combat.enemyShots) {
+      if (shot.gone) continue;
+      const { x, y, radius, age = 0, color } = shot;
+      if (shot.missile) {
+        const norm = Math.hypot(shot.vx, shot.vy) || 1;
+        const sx = shot.vx / norm;
+        const sy = shot.vy / norm;
+        const flash = Math.floor(age * 16) % 2 ? 1 : 0.44;
+        glow.lineStyle(13, CRIMSON, 0.26).lineBetween(x - sx * 29, y - sy * 29, x, y);
+        for (let i = 3; i >= 1; i--) {
+          g.fillStyle(i === 1 ? GOLD : CRIMSON, 0.89 - i * 0.2);
+          this.#pixel(g, x - sx * i * 8, y - sy * i * 8, 9 - i, 7 - i);
+        }
+        this.#diamond(g, x, y, sx, sy, 13, 8, CRIMSON);
+        g.fillStyle(GOLD, flash);
+        this.#pixel(g, x + sx * 8, y + sy * 8, 7, 6);
+        pixelRing(g, x, y, 15, GOLD, flash * 0.8, 2);
+      } else if (shot.blade) {
+        const direction = Math.atan2(shot.vy, shot.vx);
+        const twist = direction + age * 7 * shot.spin;
+        for (let i = 2; i >= 1; i--) {
+          const a = twist - i * 0.30 * shot.spin;
+          const tx = x - Math.cos(direction) * i * 13;
+          const ty = y - Math.sin(direction) * i * 13;
+          this.#diamond(g, tx, ty, Math.cos(a), Math.sin(a), 12, 7, GOLD, 0.52 / i);
+        }
+        const sx = Math.cos(twist);
+        const sy = Math.sin(twist);
+        glow.fillStyle(GOLD, 0.25).fillCircle(x, y, 17);
+        this.#diamond(g, x, y, sx, sy, 14, 9, GOLD);
+        this.#diamond(g, x, y, sx, sy, 9, 5, CRIMSON);
+      } else {
+        const pulse = shot.pulse ? 1 + Math.sin(age * 15) * 0.20 : 1;
+        const r = radius * pulse;
+        glow.fillStyle(color, 0.36).fillCircle(x, y, r + 8);
+        g.fillStyle(color);
+        this.#pixel(g, x, y, 2 * r, 1.38 * r);
+        this.#pixel(g, x, y, 1.38 * r, 2 * r);
+        g.fillStyle(shot.coreColor ?? WHITE);
+        if (shot.pulse) {
+          const turn = age * 4.25;
+          const cos = Math.cos(turn);
+          const sin = Math.sin(turn);
+          for (let arm = -2; arm <= 2; arm++) {
+
+第九空域游戏软件 V1.0                                      第 33 页 / 共 60 页
+==============================================================================
+            const offset = arm * r * 0.29;
+            this.#pixel(g, x + offset * cos, y + offset * sin, 3.8);
+            this.#pixel(g, x - offset * sin, y + offset * cos, 3.8);
+          }
+        } else {
+          this.#pixel(g, x, y, Math.max(3, r * 0.86));
+          g.fillStyle(WHITE, 0.95);
+          this.#pixel(g, x - r * 0.28, y - r * 0.28, 2, 2);
+        }
+      }
+    }
+    this.#drawBossLaser(combat);
+  }
+  #diamond(g, x, y, sx, sy, length, width, color, alpha = 1) {
+    const frontX = Math.round(x + sx * length);
+    const frontY = Math.round(y + sy * length);
+    const backX = Math.round(x - sx * length);
+    const backY = Math.round(y - sy * length);
+    g.fillStyle(color, alpha).fillTriangle(frontX, frontY, Math.round(x + sy * width), Math.round(y - sx * width), backX, backY)
+      .fillTriangle(frontX, frontY, Math.round(x - sy * width), Math.round(y + sx * width), backX, backY);
+  }
+  #playerShot(shot, now, spawnTrails = false) {
+    const g = this.bullets;
+    const glow = this.bulletGlow;
+    const { color, kind, powered } = shot;
+    const x = Math.round(shot.x);
+    const y = Math.round(shot.y);
+    const norm = Math.hypot(shot.vx, shot.vy) || 1;
+    const sx = shot.vx / norm;
+    const sy = shot.vy / norm;
+    const power = powered ? 1.33 : 1;
+    const trailPoint = (i) => ({ x: x - sx * i * 11, y: y - sy * i * 11 });
+    if (powered) {
+      glow.lineStyle(18, color, 0.28).lineBetween(x - sx * 48, y - sy * 48, x, y);
+      g.fillStyle(WHITE, 0.72);
+      this.#pixel(g, x + sy * 10, y - sx * 10, 3, 9);
+      this.#pixel(g, x - sy * 10, y + sx * 10, 3, 9);
+    }
+    if (kind === "lance") {
+      const length = 76 * power;
+      const tipX = x + sx * 12;
+      const tipY = y + sy * 12;
+      glow.lineStyle(22 * power, CRIMSON, 0.34).lineBetween(x - sx * length, y - sy * length, tipX, tipY);
+      glow.lineStyle(10 * power, GOLD, 0.28).lineBetween(x - sx * length * 0.45, y - sy * length * 0.45, tipX, tipY);
+      for (let i = 5; i >= 0; i--) {
+        const segX = tipX - sx * (i * length / 6);
+        const segY = tipY - sy * (i * length / 6);
+        const segW = Math.max(2, (6 - i) * 2.1 * power);
+        const segAlpha = 0.95 - i * 0.13;
+        g.fillStyle(i === 0 ? WHITE : i <= 2 ? CRIMSON : GOLD, segAlpha);
+        this.#pixel(g, segX, segY, segW, Math.max(4, (length / 5)));
+      }
+
+第九空域游戏软件 V1.0                                      第 34 页 / 共 60 页
+==============================================================================
+      g.fillStyle(WHITE).fillTriangle(
+        tipX + sx * 6, tipY + sy * 6,
+        tipX - sx * 36 - sy * 4, tipY - sy * 36 + sx * 4,
+        tipX - sx * 36 + sy * 4, tipY - sy * 36 - sx * 4,
+      );
+      for (let ring = 0; ring < 2; ring++) {
+        const phase = ((now * 0.008 + ring * 0.5) % 1);
+        const rx = tipX - sx * (14 + phase * 44 * power);
+        const ry = tipY - sy * (14 + phase * 44 * power);
+        const wing = 8 + phase * 10 * power;
+        g.lineStyle(2, ring === 0 ? GOLD : WHITE, 1 - phase * 0.75)
+          .lineBetween(rx - sx * 8 + sy * wing, ry - sy * 8 - sx * wing, rx, ry)
+          .lineBetween(rx, ry, rx - sx * 8 - sy * wing, ry - sy * 8 + sx * wing);
+      }
+      if (spawnTrails) {
+        this.#emitTrail(x - sx * 36 + (Math.random() - 0.5) * 10, y - sy * 36, (Math.random() - 0.5) * 55, 65, Math.random() < 0.4 ? GOLD : CRIMSON, 4, 155);
+      }
+      return;
+    }
+    if (kind === "pulse") {
+      const len = 36 * power;
+      glow.lineStyle(13 * power, color, 0.36).lineBetween(x - sx * len, y - sy * len, x + sx * 5, y + sy * 5);
+      for (let i = 5; i >= 1; i--) {
+        const p = trailPoint(i * 0.78);
+        const a = (6 - i) * 0.16;
+        glow.fillStyle(color, a * 0.65);
+        this.#pixel(glow, p.x, p.y, 11 - i, 12 - i);
+        g.fillStyle(i <= 2 ? WHITE : color, a);
+        this.#pixel(g, p.x, p.y, Math.max(2, 6 - i * 0.8), Math.max(4, 9 - i));
+      }
+      g.fillStyle(color).fillRect(Math.round(x - 3), Math.round(y - 11), 6, 22);
+      g.fillStyle(WHITE);
+      this.#pixel(g, x, y + sy * 4, 4, 14);
+      if (spawnTrails && Math.random() < 0.55) {
+        this.#emitTrail(x - sx * 18, y - sy * 18, (Math.random() - 0.5) * 40, 40, color, 3, 110);
+      }
+      return;
+    }
+    if (kind === "ice" || kind === "shard") {
+      const length = (kind === "ice" ? 28 : 20) * power;
+      const width = 9 * power;
+      glow.lineStyle(15, CYAN, 0.34).lineBetween(x - sx * length, y - sy * length, x + sx * 6, y + sy * 6);
+      g.fillStyle(CYAN).fillTriangle(x + sx * 10, y + sy * 10, x + sy * width, y - sx * width, x - sx * length, y - sy * length)
+        .fillTriangle(x + sx * 10, y + sy * 10, x - sy * width, y + sx * width, x - sx * length, y - sy * length);
+      g.fillStyle(WHITE).fillTriangle(x + sx * 8, y + sy * 8, x + sy * (width * 0.55), y - sx * (width * 0.55), x - sx * (length * 0.65), y - sy * (length * 0.65))
+        .fillTriangle(x + sx * 8, y + sy * 8, x - sy * (width * 0.55), y + sx * (width * 0.55), x - sx * (length * 0.65), y - sy * (length * 0.65));
+      for (let i = 1; i <= 3; i++) {
+        const p = trailPoint(i);
+        g.fillStyle(i === 1 ? WHITE : CYAN, 0.85 - i * 0.2);
+        const snowX = p.x + (i % 2 ? 7 : -7) + Math.sin(now * 0.015 + x) * 3;
+        const snowY = p.y + i * 2;
+        this.#pixel(g, snowX, snowY, 6, 2);
+
+第九空域游戏软件 V1.0                                      第 35 页 / 共 60 页
+==============================================================================
+        this.#pixel(g, snowX, snowY, 2, 6);
+      }
+      if (spawnTrails) {
+        this.#emitTrail(x - sx * 14, y - sy * 14, (Math.random() - 0.5) * 48, 35, WHITE, 3, 130);
+      }
+      return;
+    }
+    if (kind === "arc") {
+      const j1 = Math.sin(now * 0.04 + x * 0.2) * 5;
+      const j2 = Math.cos(now * 0.05 + y * 0.2) * 5;
+      const leftX = x - sx * 12 + sy * (9 * power + j1);
+      const leftY = y - sy * 12 - sx * (9 * power + j1);
+      const rightX = x - sx * 24 - sy * (9 * power + j2);
+      const rightY = y - sy * 24 + sx * (9 * power + j2);
+      glow.lineStyle(15 * power, GOLD, 0.44).lineBetween(x, y, leftX, leftY).lineBetween(leftX, leftY, rightX, rightY)
+        .lineBetween(rightX, rightY, x - sx * 36, y - sy * 36);
+      g.lineStyle(5 * power, GOLD, 0.96).lineBetween(x, y, leftX, leftY).lineBetween(leftX, leftY, rightX, rightY)
+        .lineBetween(rightX, rightY, x - sx * 36, y - sy * 36);
+      g.lineStyle(2, WHITE).lineBetween(x, y, leftX, leftY).lineBetween(leftX, leftY, rightX, rightY)
+        .lineBetween(rightX, rightY, x - sx * 36, y - sy * 36);
+      g.fillStyle(WHITE);
+      this.#pixel(g, x, y, 6, 6);
+      if (spawnTrails) this.#emitTrail(rightX, rightY, (Math.random() - 0.5) * 70, 50, GOLD, 4, 120);
+      return;
+    }
+    if (kind === "bio") {
+      const width = 11 * power;
+      glow.fillStyle(color, 0.36).fillCircle(x, y, width + 10);
+      this.#diamond(g, x, y, 0, 1, width + 4, width + 1, color);
+      this.#diamond(g, x, y, 0, 1, 7, 5, WHITE);
+      for (const side of [-1, 1]) {
+        const a = now * 0.02 + side * Math.PI / 2;
+        const ox = x + Math.cos(a) * 17;
+        const oy = y + Math.sin(a) * 12;
+        glow.fillStyle(color, 0.45).fillCircle(ox, oy, 6);
+        g.fillStyle(side < 0 ? WHITE : color);
+        this.#pixel(g, ox, oy, 4, 4);
+      }
+      if (spawnTrails) this.#emitTrail(x - sx * 12, y - sy * 12, (Math.random() - 0.5) * 35, 40, color, 3, 130);
+      return;
+    }
+    if (kind === "void") {
+      const width = 13 * power + 1.8 * Math.sin(now * 0.018);
+      glow.fillStyle(color, 0.42).fillCircle(x, y, width + 11);
+      pixelRing(g, x, y, width + 4, color, 0.9, 2);
+      this.#diamond(g, x, y, 0, 1, width + 2, width + 2, color);
+      this.#diamond(g, x, y, 0, 1, width * 0.74, width * 0.74, WHITE);
+      this.#diamond(g, x, y, 0, 1, width * 0.52, width * 0.52, 0x160a2c);
+      for (let i = 0; i < 2; i++) {
+        const a = now * 0.014 + i * Math.PI;
+        g.fillStyle(WHITE, 0.95);
+        this.#pixel(g, x + Math.cos(a) * (width + 6), y + Math.sin(a) * (width + 6), 4, 4);
+
+第九空域游戏软件 V1.0                                      第 36 页 / 共 60 页
+==============================================================================
+      }
+      if (spawnTrails) this.#emitTrail(x, y + 10, (Math.random() - 0.5) * 40, 50, color, 4, 150);
+      return;
+    }
+    if (["rocket", "bomb", "missile", "ember"].includes(kind)) {
+      glow.lineStyle(18 * power, color, 0.34).lineBetween(x - sx * 36, y - sy * 36, x, y);
+      g.lineStyle(11 * power, color).lineBetween(x - sx * 16, y - sy * 16, x + sx * 6, y + sy * 6);
+      g.lineStyle(5, GOLD).lineBetween(x - sx * 9, y - sy * 9, x + sx * 9, y + sy * 9);
+      g.fillStyle(WHITE);
+      this.#pixel(g, x + sx * 6, y + sy * 6, 5, 5);
+      for (let i = 1; i <= 4; i++) {
+        const flicker = Math.sin(now * 0.05 + i * 2 + shot.x * 0.1) * 3;
+        g.fillStyle(i % 2 ? GOLD : color, 1 - i * 0.18);
+        const length = 16 + i * 8 + flicker;
+        this.#pixel(g, x - sx * length, y - sy * length, Math.max(3, 11 - i * 2), Math.max(3, 7 - i));
+      }
+      if (spawnTrails) this.#emitTrail(x - sx * 24, y - sy * 24, (Math.random() - 0.5) * 50, 90, GOLD, 4, 160);
+      return;
+    }
+    if (kind === "guard") {
+      const width = shot.width ?? 24;
+      glow.lineStyle(16, GOLD, 0.32).beginPath().arc(x, y + 13, width + 8, 3.62, 5.80).strokePath();
+      g.lineStyle(6, GOLD, 0.96).beginPath().arc(x, y + 13, width + 3, 3.68, 5.74).strokePath();
+      g.lineStyle(3, WHITE).beginPath().arc(x, y + 13, width - 3, 3.74, 5.68).strokePath();
+      g.lineStyle(2, GOLD, 0.48).beginPath().arc(x, y + 25, width * 0.85, 3.85, 5.57).strokePath();
+      for (const side of [-1, 0, 1]) {
+        g.fillStyle(WHITE);
+        this.#pixel(g, x + side * width * 0.72, y + 13 - width + Math.abs(side) * 7, 7, 4);
+      }
+      return;
+    }
+    const length = (kind === "drone" || kind === "needle" ? 36 : kind === "overload" ? 42 : 24) * power;
+    const width = (kind === "overload" ? 10 : 5) * power;
+    glow.lineStyle(width + 11, color, 0.35).lineBetween(x - sx * length, y - sy * length, x + sx * 4, y + sy * 4);
+    for (let i = 4; i >= 1; i--) {
+      const p = trailPoint(i * 0.85);
+      g.fillStyle(i === 1 ? WHITE : color, 0.9 - i * 0.16);
+      this.#pixel(g, p.x, p.y, Math.max(2, width - i * 0.7), 6);
+    }
+    g.lineStyle(width, color, 0.98).lineBetween(x - sx * length * 0.68, y - sy * length * 0.68, x + sx * 3, y + sy * 3);
+    g.lineStyle(2, WHITE).lineBetween(x - sx * length * 0.45, y - sy * length * 0.45, x + sx * 4, y + sy * 4);
+  }
+  #drawBossLaser(combat) {
+    const laser = combat.boss?.laser;
+    if (!laser) return;
+    const { x, y, ex, ey } = laser;
+    const sx = (ex - x) / 1500;
+    const sy = (ey - y) / 1500;
+    if (laser.phase === "charge") {
+      const flash = Math.floor(combat.session.elapsedMs / 70) % 2 ? 1 : 0.35;
+      this.bullets.lineStyle(2, GOLD, flash).lineBetween(x, y, ex, ey);
+      for (let i = 0; i < 8; i++) {
+
+第九空域游戏软件 V1.0                                      第 37 页 / 共 60 页
+==============================================================================
+        const a = i * Math.PI / 4 - combat.session.elapsedMs * 0.009;
+        const r = 34 - ((combat.session.elapsedMs / 18 + i * 4) % 20);
+        this.bullets.fillStyle(GOLD, 0.9);
+        this.#pixel(this.bullets, x + Math.cos(a) * r, y + Math.sin(a) * r, 4, 4);
+      }
+      return;
+    }
+    this.bulletGlow.lineStyle(laser.width + 22, CRIMSON, 0.35).lineBetween(x, y, ex, ey);
+    this.bullets.lineStyle(laser.width, CRIMSON, 0.95).lineBetween(x, y, ex, ey);
+    this.bullets.lineStyle(Math.max(8, laser.width * 0.38), WHITE, 1).lineBetween(x, y, ex, ey);
+    for (let i = 1; i < 13; i++) {
+      const d = i * 72 + (combat.session.elapsedMs * 0.45) % 72;
+      this.bullets.fillStyle(i % 2 ? WHITE : CRIMSON, 0.8);
+      this.#pixel(this.bullets, x + sx * d + sy * (i % 2 ? 9 : -9), y + sy * d - sx * (i % 2 ? 9 : -9),
+        i % 2 ? 5 : 11, i % 2 ? 9 : 4);
+    }
+  }
+  #drawPickups(pickups, now) {
+    const g = this.markers;
+    for (const gem of pickups) {
+      const { x, y } = gem;
+      const heal = gem.type === "heal";
+      const color = heal ? CRIMSON : gem.type === "gold" ? GOLD : CYAN;
+      const size = gem.type === "green" ? 8 : 12;
+      g.fillStyle(color, 0.16 + 0.07 * Math.sin(now / 115 + x)).fillCircle(x, y, size + 7);
+      if (heal) {
+        g.fillStyle(INDIGO).fillRect(x - 12, y - 12, 24, 24);
+        g.lineStyle(2, color).strokeRect(x - 12, y - 12, 24, 24);
+        g.fillStyle(WHITE).fillRect(x - 7, y - 2, 14, 4).fillRect(x - 2, y - 7, 4, 14);
+      } else {
+        g.fillStyle(color).fillTriangle(x, y - size, x - size * 0.7, y, x + size * 0.7, y);
+        g.fillStyle(color, 0.75).fillTriangle(x, y + size, x - size * 0.7, y, x + size * 0.7, y);
+        g.fillStyle(WHITE, 0.9).fillRect(x - 1, y - size * 0.56, 2, size * 0.52);
+      }
+    }
+  }
+  #status(s) {
+    const { x, y } = s.ship;
+    const g = this.markers;
+    const rank = s.build?.main ?? 1;
+    const accent = this.fighter.color;
+    if (rank >= 2) {
+      const bob = Math.sin(s.elapsedMs * 0.008) * 3;
+      for (const side of [-1, 1]) {
+        const px = x + side * 38;
+        const py = y + 8 + bob;
+        this.bulletGlow.fillStyle(accent, 0.25);
+        this.#pixel(this.bulletGlow, px, py, 16, 18);
+        g.fillStyle(INDIGO);
+        this.#pixel(g, px, py, 10, 14);
+        g.fillStyle(accent);
+        this.#pixel(g, px, py, 6, 10);
+
+第九空域游戏软件 V1.0                                      第 38 页 / 共 60 页
+==============================================================================
+        g.fillStyle(WHITE);
+        this.#pixel(g, px, py - 3, 3, 4);
+      }
+    }
+    if (rank >= 3 || s.build?.synergy) {
+      const auraR = 46 + Math.sin(s.elapsedMs * 0.01) * 3;
+      pixelRing(this.bulletGlow, x, y, auraR, s.build?.synergy ? GOLD : accent, 0.24, 6);
+      if (s.build?.synergy) {
+        for (let i = 0; i < 4; i++) {
+          const a = i * Math.PI / 2 + s.elapsedMs * 0.004;
+          g.fillStyle(GOLD, 0.9);
+          this.#pixel(g, x + Math.cos(a) * auraR, y + Math.sin(a) * auraR, 4, 4);
+        }
+      }
+    }
+    if (s.guard || s.shield > 0) {
+      const color = s.guard ? WHITE : CYAN;
+      g.lineStyle(3, color, s.guard ? 0.67 : 0.31);
+      for (let i = 0; i < 4; i++) {
+        const a = i * Math.PI / 2 + s.elapsedMs / 1700;
+        g.beginPath().arc(x, y + 1, 56, a, a + 0.97).strokePath();
+      }
+    }
+    if (s.rageUntil > s.elapsedMs) {
+      for (let i = 0; i < 8; i++) {
+        const position = i * Math.PI / 4 + s.elapsedMs * 0.004;
+        const bx = x + Math.cos(position) * 52;
+        const by = y + Math.sin(position) * 45;
+        this.bulletGlow.fillStyle(GREEN, 0.28);
+        this.#pixel(this.bulletGlow, bx, by, 14, 7);
+        for (let tail = 1; tail <= 3; tail++) {
+          const angle = position - tail * 0.15;
+          g.fillStyle(GREEN, 0.64 - tail * 0.13);
+          this.#pixel(g, x + Math.cos(angle) * 52, y + Math.sin(angle) * 45, 7 - tail, 4);
+        }
+        g.fillStyle(i % 2 ? WHITE : GREEN, 0.95);
+        g.fillTriangle(bx + Math.cos(position) * 10, by + Math.sin(position) * 10,
+          bx + Math.cos(position + 2.3) * 5, by + Math.sin(position + 2.3) * 5,
+          bx + Math.cos(position - 2.3) * 5, by + Math.sin(position - 2.3) * 5);
+      }
+    }
+    if (this.grazeMs > 0 || s.invulnerableMs > 0) {
+      g.lineStyle(1, this.grazeMs > 0 ? CYAN : CRIMSON, this.grazeMs > 0 ? 0.76 : 0.42).strokeCircle(x, y, 11);
+    }
+    g.fillStyle(CYAN, 0.42).fillCircle(x, y, 4);
+    g.fillStyle(WHITE, 0.93).fillCircle(x, y, 3);
+  }
+}
+import Phaser from "phaser";
+import { BOSS_HARDPOINTS } from "../core/stage-director.js";
+const ASSET_BASE = import.meta.env.BASE_URL;
+const MANIFEST_KEY = "solo-assets";
+
+第九空域游戏软件 V1.0                                      第 39 页 / 共 60 页
+==============================================================================
+export class BootScene extends Phaser.Scene {
+  constructor() {
+    super({ key: "BootScene" });
+  }
+  preload() {
+    this.load.json(MANIFEST_KEY, ASSET_BASE + "assets/manifest.json");
+  }
+  create() {
+    const manifest = this.cache.json.get(MANIFEST_KEY);
+    if (!manifest) {
+      this.#showError();
+      return;
+    }
+    const entries = [...manifest.fighters, ...manifest.enemies, ...manifest.bosses];
+    const backgrounds = manifest.backgrounds ?? [];
+    for (const entry of entries) this.load.image(entry.id, ASSET_BASE + entry.path);
+    for (const bg of backgrounds) this.load.image(bg.id, ASSET_BASE + bg.path);
+    this.load.once(Phaser.Loader.Events.COMPLETE, () => {
+      if (entries.some(({ id }) => !this.textures.exists(id))) {
+        this.#showError();
+        return;
+      }
+      for (const bg of backgrounds) {
+        if (this.textures.exists(bg.id)) {
+          this.textures.get(bg.id).setFilter(Phaser.Textures.FilterMode.NEAREST);
+        }
+      }
+      for (const { id, category } of entries) {
+        const texture = this.textures.get(id);
+        texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+        if (this.game.renderer.type === Phaser.CANVAS) {
+          this.#canvasTints(id, texture.getSourceImage(), category !== "fighter");
+        }
+        if (category === "boss") this.#bossDamageTextures(id, texture.getSourceImage());
+      }
+      this.registry.set("solo-assets", manifest);
+      this.registry.set("fighter-id", manifest.fighters[0].id);
+      this.registry.set("game-mode", "campaign");
+      this.registry.set("game-difficulty", "standard");
+      this.scene.start("MenuScene");
+    });
+    this.load.start();
+  }
+  #derived(key, source, draw) {
+    const texture = this.textures.createCanvas(key, source.width, source.height);
+    const context = texture.getContext();
+    context.drawImage(source, 0, 0);
+    draw(context, source.width, source.height);
+    texture.refresh();
+    texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    return texture.getSourceImage();
+  }
+
+第九空域游戏软件 V1.0                                      第 40 页 / 共 60 页
+==============================================================================
+  #canvasTints(id, source, enemy) {
+    const fill = (key, color) => this.#derived(id + "-" + key, source, (ctx, w, h) => {
+      ctx.globalCompositeOperation = "source-in";
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = "source-over";
+    });
+    fill("shadow", "#02060e");
+    if (!enemy) return;
+    fill("white", "#fff");
+    this.#derived(id + "-ice", source, (ctx, w, h) => {
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = "#64caff99";
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = "source-over";
+    });
+  }
+  #bossDamageTextures(id, original) {
+    for (let mask = 1; mask <= 3; mask++) {
+      const key = id + "-damage-" + mask;
+      const damage = this.#derived(key, original, (ctx) => {
+        for (const [index, part] of BOSS_HARDPOINTS[id].slice(0, 2).entries()) {
+          if (!(mask & (1 << index))) continue;
+          const { x, y, cut: [width, height] } = part;
+          const top = y - height / 2;
+          ctx.globalCompositeOperation = "destination-out";
+          for (const [row, span] of [0.58, 0.84, 1, 0.75].entries()) {
+            const size = Math.round(width * span);
+            ctx.fillRect(Math.round(x - size / 2), Math.round(top + row * height / 4), size, Math.ceil(height / 4));
+          }
+          ctx.globalCompositeOperation = "source-atop";
+          ctx.fillStyle = "#44252a9e";
+          ctx.fillRect(Math.round(x - width / 2 - 4), Math.round(top - 4), width + 8, height + 8);
+          ctx.globalCompositeOperation = "source-over";
+        }
+      });
+      if (this.game.renderer.type === Phaser.CANVAS) this.#canvasTints(key, damage, true);
+    }
+  }
+  #showError() {
+    document.querySelector("#solo-ui").textContent = "素材载入失败，请刷新后重试。";
+  }
+}
+import Phaser from "phaser";
+import { bgm } from "../audio/bgm-synth.js";
+import { sfx } from "../audio/sfx-synth.js";
+import { EnvironmentView } from "../presentation/environment-view.js";
+import { FIGHTERS, OVERLOADS } from "../core/fighter-catalog.js";
+import { PILOT_LORE } from "../core/pilot-lore.js";
+import { ACHIEVEMENTS, loadAchievements } from "../state/achievements.js";
+import { loadRecords } from "../state/records.js";
+import { getActionIconSvg } from "../ui/pixel-icons.js";
+
+第九空域游戏软件 V1.0                                      第 41 页 / 共 60 页
+==============================================================================
+function fighterMetrics(fighterId) {
+  const f = FIGHTERS[fighterId];
+  const power = Math.min(100, Math.round((f.damage * f.barrels.length) / 0.72));
+  const rof = Math.min(100, Math.round((390 - f.interval) / 2.6));
+  const hp = Math.min(100, Math.round((f.hp - 85) * 3.1));
+  return { power: Math.max(32, power), rof: Math.max(28, rof), hp: Math.max(36, hp) };
+}
+export class MenuScene extends Phaser.Scene {
+  constructor() {
+    super({ key: "MenuScene" });
+  }
+  create() {
+    this.environment = new EnvironmentView(this);
+    this.flight = { ship: { x: 360, y: 640, vx: 0 }, overload: false, warpDashMs: 0, stage: 1 };
+    const { fighters } = this.registry.get("solo-assets");
+    const records = loadRecords();
+    const unlocked = loadAchievements();
+    const unlockedCount = ACHIEVEMENTS.filter((a) => Boolean(unlocked[a.id])).length;
+    const initialMode = this.registry.get("game-mode") ?? "campaign";
+    const initialDiff = this.registry.get("game-difficulty") ?? "standard";
+    const overlay = document.querySelector("#solo-ui");
+    overlay.innerHTML = `
+      <section class="solo-menu" aria-label="选择出击战机">
+        <header class="solo-brand">
+          <div class="solo-brand-top">
+            <span class="solo-wordmark">SECTOR NINE // V1.0</span>
+            <div class="solo-brand-actions">
+              <button class="solo-medals-btn" type="button">${getActionIconSvg("trophy")}<span>勋章 ${unlockedCount}/${ACHIEVEMENTS.length}</span></button>
+              <button class="solo-sound solo-menu-sound" type="button"></button>
+            </div>
+          </div>
+          <h1>第九空域</h1>
+          <div class="solo-mode-bar" role="group" aria-label="模式与难度">
+            <div class="solo-seg">
+              <button type="button" data-mode="campaign" aria-pressed="${initialMode === "campaign"}">常规战役</button>
+              <button type="button" data-mode="endless" aria-pressed="${initialMode === "endless"}">无尽模式</button>
+            </div>
+            <div class="solo-seg">
+              <button type="button" data-diff="standard" aria-pressed="${initialDiff === "standard"}">标准</button>
+              <button type="button" data-diff="hardcore" aria-pressed="${initialDiff === "hardcore"}">硬核</button>
+            </div>
+          </div>
+        </header>
+        <div class="solo-preview" aria-hidden="true">
+          <div class="solo-preview-stage">
+            <span class="solo-preview-glow"></span>
+            <span class="solo-ring solo-ring-outer"></span>
+            <span class="solo-ring solo-ring-inner"></span>
+            <span class="solo-reticle"></span>
+            <img class="solo-preview-ship" alt="" draggable="false">
+          </div>
+        </div>
+
+第九空域游戏软件 V1.0                                      第 42 页 / 共 60 页
+==============================================================================
+        <div class="solo-pilot-card">
+          <div class="solo-pilot-frame">
+            <img class="solo-pilot-img" alt="" draggable="false">
+          </div>
+          <div class="solo-pilot-info">
+            <div class="solo-caption-top">
+              <div>
+                <span class="solo-callsign"></span>
+                <strong></strong>
+              </div>
+              <span class="solo-overload-tag"></span>
+            </div>
+            <p class="solo-pilot-bio"></p>
+            <div class="solo-stat-row">
+              <label>火力 <i data-stat="pwr"></i></label>
+              <label>射速 <i data-stat="rof"></i></label>
+              <label>耐久 <i data-stat="hp"></i></label>
+            </div>
+          </div>
+        </div>
+        <div class="solo-fighter-grid" role="group" aria-label="战机">
+          ${fighters.map((fighter) => {
+            const hex = "#" + FIGHTERS[fighter.id].color.toString(16).padStart(6, "0");
+            const rec = records[fighter.id];
+            const badge = rec?.bestRank ? `<em class="solo-tile-rank rank-${rec.bestRank}">${rec.bestRank}</em>` : "";
+            return `
+            <button type="button" data-fighter="${fighter.id}" style="--tile-accent: ${hex}" aria-pressed="false">
+              <img src="${import.meta.env.BASE_URL + fighter.path}" alt="" draggable="false">
+              <span>${fighter.cnName}</span>
+              ${badge}
+            </button>`;
+          }).join("")}
+        </div>
+        <button class="solo-primary solo-launch" type="button">
+          <span>全军出击 · ENGAGE</span>
+          <span class="solo-launch-arrow" aria-hidden="true">▶</span>
+        </button>
+      </section>
+      <div class="solo-dialog-wrap" hidden></div>`;
+    const menu = overlay.firstElementChild;
+    const medalWrap = overlay.querySelector(".solo-dialog-wrap");
+    const previewShip = menu.querySelector(".solo-preview-ship");
+    const pilotImg = menu.querySelector(".solo-pilot-img");
+    const callsign = menu.querySelector(".solo-callsign");
+    const pilotName = menu.querySelector(".solo-pilot-info strong");
+    const pilotBio = menu.querySelector(".solo-pilot-bio");
+    const overloadTag = menu.querySelector(".solo-overload-tag");
+    const statPwr = menu.querySelector('[data-stat="pwr"]');
+    const statRof = menu.querySelector('[data-stat="rof"]');
+    const statHp = menu.querySelector('[data-stat="hp"]');
+    const buttons = [...menu.querySelectorAll("[data-fighter]")];
+    const select = (fighter) => {
+
+第九空域游戏软件 V1.0                                      第 43 页 / 共 60 页
+==============================================================================
+      const hex = "#" + FIGHTERS[fighter.id].color.toString(16).padStart(6, "0");
+      const lore = PILOT_LORE[fighter.id];
+      const rec = records[fighter.id];
+      menu.style.setProperty("--accent", hex);
+      this.registry.set("fighter-id", fighter.id);
+      previewShip.classList.remove("switch-pop");
+      void previewShip.offsetWidth;
+      previewShip.src = import.meta.env.BASE_URL + fighter.path;
+      previewShip.classList.add("switch-pop");
+      pilotImg.src = import.meta.env.BASE_URL + `assets/pilots/${fighter.id}.png`;
+      callsign.textContent = `${lore.callsign} · ${lore.pilot}（${lore.unit}）`;
+      pilotName.textContent = `${fighter.cnName} · ${fighter.role}`;
+      const endlessStr = rec?.bestEndlessStage ? ` · 无尽S${rec.bestEndlessStage}` : "";
+      pilotBio.textContent = rec?.bestScore
+        ? `${lore.bio} [最高 ${rec.bestScore.toLocaleString()} · ${rec.clears}胜${endlessStr}]`
+        : lore.bio;
+      overloadTag.textContent = "超载 · " + OVERLOADS[fighter.id].name;
+      const metrics = fighterMetrics(fighter.id);
+      statPwr.style.setProperty("--val", `${metrics.power}%`);
+      statRof.style.setProperty("--val", `${metrics.rof}%`);
+      statHp.style.setProperty("--val", `${metrics.hp}%`);
+      for (const button of buttons) {
+        button.setAttribute("aria-pressed", String(button.dataset.fighter === fighter.id));
+      }
+    };
+    for (const [index, button] of buttons.entries()) {
+      button.addEventListener("click", () => {
+        sfx.unlock();
+        bgm.setMode("hangar");
+        select(fighters[index]);
+      });
+    }
+    for (const btn of menu.querySelectorAll("[data-mode]")) {
+      btn.addEventListener("click", () => {
+        const mode = btn.dataset.mode;
+        this.registry.set("game-mode", mode);
+        for (const b of menu.querySelectorAll("[data-mode]")) {
+          b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+        }
+      });
+    }
+    for (const btn of menu.querySelectorAll("[data-diff]")) {
+      btn.addEventListener("click", () => {
+        const diff = btn.dataset.diff;
+        this.registry.set("game-difficulty", diff);
+        for (const b of menu.querySelectorAll("[data-diff]")) {
+          b.setAttribute("aria-pressed", String(b.dataset.diff === diff));
+        }
+      });
+    }
+    const openMedals = () => {
+      const latest = loadAchievements();
+
+第九空域游戏软件 V1.0                                      第 44 页 / 共 60 页
+==============================================================================
+      const totalUnlocked = ACHIEVEMENTS.filter((a) => Boolean(latest[a.id])).length;
+      const bestEndless = Math.max(0, ...Object.values(records).map((r) => r.bestEndlessStage ?? 0));
+      const totalClears = Object.values(records).reduce((sum, r) => sum + (r.clears ?? 0), 0);
+      medalWrap.hidden = false;
+      medalWrap.innerHTML = `
+        <section class="solo-dialog" data-kind="medals" role="dialog" aria-modal="true" aria-labelledby="solo-medal-title" tabindex="-1">
+          <header class="solo-dialog-bar">
+            <span class="solo-bar-code"><i class="solo-led on" aria-hidden="true"></i>HALL OF HONOR // ${totalUnlocked}/${ACHIEVEMENTS.length}</span>
+            <span class="solo-bar-meta">${bestEndless ? `无尽最高 S${bestEndless}` : "无尽未出击"}</span>
+          </header>
+          <div class="solo-medal-summary">
+            <h2 id="solo-medal-title">战功勋章殿堂</h2>
+            <span>总计通关 ${totalClears} 次</span>
+          </div>
+          <div class="solo-medal-grid">
+            ${ACHIEVEMENTS.map((ach) => {
+              const ok = Boolean(latest[ach.id]);
+              return `
+              <div class="solo-medal-card" data-unlocked="${ok}" data-tier="${ach.tier}">
+                <span class="solo-medal-icon">${getActionIconSvg(ok ? "trophy" : "lock")}</span>
+                <div>
+                  <strong>${ach.title}</strong>
+                  <small>${ach.desc}</small>
+                </div>
+              </div>`;
+            }).join("")}
+          </div>
+          <div class="solo-dialog-actions">
+            <button class="solo-secondary solo-arcade-btn" type="button" data-close-medals>
+              <span class="solo-btn-icon">${getActionIconSvg("hangar")}</span>
+              <span class="solo-btn-label">返回机库整备</span>
+            </button>
+          </div>
+        </section>`;
+      medalWrap.querySelector("[data-close-medals]")?.addEventListener("click", () => {
+        medalWrap.hidden = true;
+        medalWrap.replaceChildren();
+      });
+    };
+    menu.querySelector(".solo-medals-btn")?.addEventListener("click", openMedals);
+    const sound = menu.querySelector(".solo-sound");
+    const syncSound = () => {
+      sound.textContent = sfx.muted ? "静音" : "音效";
+      sound.setAttribute("aria-label", sfx.muted ? "开启音效" : "静音");
+      sound.setAttribute("aria-pressed", String(sfx.muted));
+    };
+    syncSound();
+    sound.addEventListener("click", () => {
+      sfx.toggleMute();
+      syncSound();
+    });
+    menu.querySelector(".solo-launch").addEventListener("click", () => {
+
+第九空域游戏软件 V1.0                                      第 45 页 / 共 60 页
+==============================================================================
+      sfx.unlock();
+      this.scene.start("BattleScene");
+    });
+    select(fighters.find((fighter) => fighter.id === this.registry.get("fighter-id")));
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => overlay.replaceChildren());
+  }
+  update(_time, delta) {
+    this.environment.render(this.flight, Math.min(delta, 50));
+  }
+}
+import Phaser from "phaser";
+import { bgm } from "../audio/bgm-synth.js";
+import { sfx } from "../audio/sfx-synth.js";
+import { SoloCombat } from "../core/solo-combat.js";
+import { EnvironmentView } from "../presentation/environment-view.js";
+import { V2ActorRenderer } from "../presentation/v2-actor-renderer.js";
+import { FIELD, SoloSession } from "../state/solo-session.js";
+import { SoloHud } from "../ui/solo-hud.js";
+const DIRECTIONS = new Map([
+  ["ArrowLeft", [-1, 0]], ["KeyA", [-1, 0]],
+  ["ArrowRight", [1, 0]], ["KeyD", [1, 0]],
+  ["ArrowUp", [0, -1]], ["KeyW", [0, -1]],
+  ["ArrowDown", [0, 1]], ["KeyS", [0, 1]],
+]);
+export class BattleScene extends Phaser.Scene {
+  constructor() {
+    super({ key: "BattleScene" });
+  }
+  create() {
+    this.hitstopMs = 0;
+    this.resultDelay = null;
+    this.session = new SoloSession(this.registry.get("fighter-id"), Math.random, {
+      mode: this.registry.get("game-mode") ?? "campaign",
+      difficulty: this.registry.get("game-difficulty") ?? "standard",
+    });
+    this.combat = new SoloCombat(this.session, this.registry.get("solo-assets"));
+    this.environment = new EnvironmentView(this);
+    this.actors = new V2ActorRenderer(this, this.session.fighterId);
+    this.hud = new SoloHud({
+      onOverload: () => this.combat.triggerOverload(),
+      onPause: () => this.#togglePause(),
+      onUpgrade: (id) => {
+        if (this.session.chooseUpgrade(id) && this.session.phase === "upgrade") {
+          this.combat.events.push({ type: "level" });
+        }
+      },
+      onRetry: () => {
+        sfx.unlock();
+        this.scene.restart();
+      },
+      onMute: () => sfx.toggleMute(),
+      isMuted: () => sfx.muted,
+
+第九空域游戏软件 V1.0                                      第 46 页 / 共 60 页
+==============================================================================
+      onMenu: () => this.scene.start("MenuScene"),
+    });
+    this.hud.render(this.combat);
+    this.#bindInput();
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      bgm.setMode("off");
+      this.inputScope.abort();
+      this.hud.destroy();
+    });
+    bgm.setMode("stage");
+  }
+  #togglePause() {
+    if (this.session.phase === "playing") {
+      this.session.phase = "paused";
+      this.#resetSteering();
+    } else if (this.session.phase === "paused") {
+      this.session.phase = "playing";
+    }
+  }
+  #resetSteering() {
+    if (this.drag) {
+      const canvas = this.game.canvas;
+      if (canvas.hasPointerCapture(this.drag.id)) canvas.releasePointerCapture(this.drag.id);
+      this.drag = null;
+    }
+    this.held.clear();
+    this.session.setTarget(this.session.ship.x, this.session.ship.y);
+  }
+  #bindInput() {
+    this.held = new Set();
+    this.drag = null;
+    this.inputScope = new AbortController();
+    const opts = { signal: this.inputScope.signal };
+    const canvas = this.game.canvas;
+    const toGame = (evt) => {
+      const bounds = canvas.getBoundingClientRect();
+      return {
+        x: (evt.clientX - bounds.left) * FIELD.width / bounds.width,
+        y: (evt.clientY - bounds.top) * FIELD.height / bounds.height,
+      };
+    };
+    canvas.addEventListener("pointerdown", (evt) => {
+      if (evt.button !== 0 || this.session.phase !== "playing" || this.drag) return;
+      const { x, y } = toGame(evt);
+      if (evt.pointerType === "mouse") {
+        this.session.setTarget(x, y);
+        return;
+      }
+      this.drag = { id: evt.pointerId, x, y };
+      canvas.setPointerCapture(evt.pointerId);
+    }, opts);
+    canvas.addEventListener("pointermove", (evt) => {
+
+第九空域游戏软件 V1.0                                      第 47 页 / 共 60 页
+==============================================================================
+      if (this.session.phase !== "playing" || this.held.size) return;
+      if (evt.pointerType !== "mouse" && this.drag?.id !== evt.pointerId) return;
+      const { x, y } = toGame(evt);
+      if (evt.pointerType === "mouse") {
+        this.session.setTarget(x, y);
+        return;
+      }
+      const ship = this.session.ship;
+      this.session.setTarget(ship.targetX + x - this.drag.x, ship.targetY + y - this.drag.y);
+      Object.assign(this.drag, { x, y });
+    }, opts);
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      canvas.addEventListener(type, (evt) => {
+        if (this.drag?.id === evt.pointerId) this.drag = null;
+      }, opts);
+    }
+    window.addEventListener("keydown", (evt) => {
+      if (evt.code === "Escape" && !evt.repeat) this.#togglePause();
+      if (this.session.phase !== "playing") return;
+      if (evt.code === "Space" && !(evt.target instanceof HTMLButtonElement)) {
+        evt.preventDefault();
+        if (!evt.repeat) this.combat.triggerOverload();
+      }
+      if (!DIRECTIONS.has(evt.code)) return;
+      evt.preventDefault();
+      if (!this.held.size) this.#resetSteering();
+      this.held.add(evt.code);
+    }, opts);
+    window.addEventListener("keyup", (evt) => this.held.delete(evt.code), opts);
+    window.addEventListener("blur", () => this.#resetSteering(), opts);
+  }
+  #steerByKeyboard(dtMs) {
+    let x = 0;
+    let y = 0;
+    for (const key of this.held) {
+      const [dx, dy] = DIRECTIONS.get(key);
+      x += dx;
+      y += dy;
+    }
+    const length = Math.hypot(x, y);
+    if (!length) return;
+    const step = 0.62 * (this.session.fighter.move ?? 1) * (this.session.comboTier ? 1.08 : 1) * dtMs / length;
+    const { targetX, targetY } = this.session.ship;
+    this.session.setTarget(targetX + x * step, targetY + y * step);
+  }
+  update(_time, delta) {
+    const { session: s, combat } = this;
+    const dt = Math.min(delta, 50);
+    const before = s.phase;
+    const stopped = Math.min(dt, this.hitstopMs);
+    this.hitstopMs -= stopped;
+    combat.advance(dt - stopped, (ms) => this.#steerByKeyboard(ms));
+
+第九空域游戏软件 V1.0                                      第 48 页 / 共 60 页
+==============================================================================
+    if (before === "playing" && s.phase !== "playing") this.#resetSteering();
+    for (const event of combat.events) {
+      if (event.heavy && (event.type === "destroy" || event.type === "part-break")) {
+        this.hitstopMs = Math.max(this.hitstopMs, 28);
+        this.cameras.main.shake(125, event.type === "part-break" ? 0.0059 : 0.0041);
+      }
+      if (event.type === "boss-laser-fire") this.cameras.main.shake(175, 0.0054);
+      if (event.type === "boss-phase") this.cameras.main.shake(220, 0.0062);
+      if (event.type === "overload") this.cameras.main.shake(110, 0.0038);
+    }
+    sfx.consume(combat.events);
+    if (s.phase === "playing") bgm.setMode(combat.boss ? "boss" : "stage");
+    else if (s.phase === "victory" || s.phase === "defeat") bgm.setMode("off");
+    if (s.phase === "victory" || s.phase === "defeat") this.resultDelay = (this.resultDelay ?? 580) - dt;
+    if (before === "playing" || combat.events.length || this.resultDelay > 0) {
+      this.environment.render({ ship: s.ship, overload: s.overloadMs > 0, warpDashMs: s.warpDashMs, stage: s.sector }, dt - stopped);
+      this.actors.render(combat, dt);
+    }
+    this.hud.render(combat, this.resultDelay === null || this.resultDelay <= 0);
+    combat.events.length = 0;
+  }
+}
+const svg = (body) =>
+  `<svg class="solo-px-svg" viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true">${body}</svg>`;
+const r = (x, y, w, h, fill) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"/>`;
+const UPGRADE_ICONS = {
+  missile: svg(
+    r(10, 2, 3, 3, "#060912") +
+      r(8, 3, 4, 4, "#060912") +
+      r(6, 5, 5, 5, "#060912") +
+      r(4, 7, 5, 5, "#060912") +
+      r(11, 2, 2, 2, "#ff3552") +
+      r(10, 3, 2, 2, "#ffd447") +
+      r(8, 4, 3, 3, "#e4ecf7") +
+      r(6, 6, 3, 3, "#c4d2e8") +
+      r(9, 4, 1, 2, "#ffffff") +
+      r(4, 5, 3, 2, "#38e4d4") +
+      r(9, 10, 2, 3, "#38e4d4") +
+      r(3, 10, 3, 3, "#ff8b2c") +
+      r(2, 12, 2, 2, "#ffd447")
+  ),
+  blade: svg(
+    r(7, 1, 6, 3, "#060912") +
+      r(10, 3, 4, 6, "#060912") +
+      r(7, 8, 6, 4, "#060912") +
+      r(4, 10, 5, 4, "#060912") +
+      r(8, 2, 4, 2, "#38e4d4") +
+      r(11, 4, 2, 5, "#38e4d4") +
+      r(8, 9, 4, 2, "#38e4d4") +
+      r(5, 11, 3, 2, "#7ea3d6") +
+      r(9, 3, 2, 1, "#ffffff") +
+      r(11, 5, 1, 4, "#ffffff") +
+
+第九空域游戏软件 V1.0                                      第 49 页 / 共 60 页
+==============================================================================
+      r(3, 12, 2, 2, "#ffd447") +
+      r(2, 13, 1, 1, "#ffffff")
+  ),
+  relay: svg(
+    r(7, 1, 5, 5, "#060912") +
+      r(4, 5, 8, 4, "#060912") +
+      r(5, 8, 6, 7, "#060912") +
+      r(8, 2, 3, 2, "#ffd447") +
+      r(7, 4, 3, 2, "#ffd447") +
+      r(5, 6, 6, 2, "#fff2b2") +
+      r(7, 8, 3, 3, "#ffd447") +
+      r(6, 11, 2, 3, "#ff8b2c") +
+      r(2, 4, 2, 2, "#38e4d4") +
+      r(12, 9, 2, 2, "#38e4d4") +
+      r(3, 10, 1, 1, "#ffffff")
+  ),
+  bomb: svg(
+    r(5, 1, 6, 14, "#060912") +
+      r(3, 5, 10, 8, "#060912") +
+      r(7, 2, 2, 2, "#ffd447") +
+      r(6, 4, 4, 2, "#ff3552") +
+      r(5, 6, 6, 5, "#7ea3d6") +
+      r(6, 6, 2, 5, "#c4d2e8") +
+      r(5, 8, 6, 1, "#384b6b") +
+      r(4, 10, 2, 3, "#ff8b2c") +
+      r(10, 10, 2, 3, "#ff8b2c") +
+      r(6, 12, 4, 2, "#ff8b2c") +
+      r(7, 13, 2, 2, "#ffd447")
+  ),
+  gun: svg(
+    r(3, 5, 4, 10, "#060912") +
+      r(9, 5, 4, 10, "#060912") +
+      r(4, 6, 2, 7, "#7ea3d6") +
+      r(10, 6, 2, 7, "#7ea3d6") +
+      r(4, 6, 1, 7, "#e4ecf7") +
+      r(10, 6, 1, 7, "#e4ecf7") +
+      r(3, 11, 10, 3, "#384b6b") +
+      r(4, 12, 8, 1, "#c4d2e8") +
+      r(4, 2, 2, 3, "#ffd447") +
+      r(10, 2, 2, 3, "#ffd447") +
+      r(4, 1, 2, 1, "#ffffff") +
+      r(10, 1, 2, 1, "#ffffff")
+  ),
+  "擦弹反击飞弹": svg(
+    r(2, 2, 12, 12, "#060912") +
+      r(3, 3, 3, 1, "#38e4d4") +
+      r(3, 3, 1, 3, "#38e4d4") +
+      r(10, 3, 3, 1, "#38e4d4") +
+      r(12, 3, 1, 3, "#38e4d4") +
+      r(3, 12, 3, 1, "#38e4d4") +
+      r(3, 10, 1, 3, "#38e4d4") +
+      r(10, 12, 3, 1, "#38e4d4") +
+
+第九空域游戏软件 V1.0                                      第 50 页 / 共 60 页
+==============================================================================
+      r(12, 10, 1, 3, "#38e4d4") +
+      r(5, 5, 2, 5, "#e4ecf7") +
+      r(9, 5, 2, 5, "#e4ecf7") +
+      r(5, 4, 2, 1, "#ff3552") +
+      r(9, 4, 2, 1, "#ff3552") +
+      r(5, 10, 2, 2, "#ffd447") +
+      r(9, 10, 2, 2, "#ffd447")
+  ),
+  "棱镜分裂": svg(
+    r(5, 4, 6, 8, "#060912") +
+      r(7, 5, 2, 6, "#38e4d4") +
+      r(6, 6, 4, 4, "#9ef7ff") +
+      r(7, 7, 2, 2, "#ffffff") +
+      r(1, 7, 4, 2, "#ffd447") +
+      r(11, 3, 4, 2, "#38e4d4") +
+      r(11, 7, 4, 2, "#ffffff") +
+      r(11, 11, 4, 2, "#ff5ce1")
+  ),
+  "狂热连杀": svg(
+    r(3, 2, 10, 12, "#060912") +
+      r(7, 2, 2, 3, "#ffd447") +
+      r(5, 4, 6, 3, "#ff8b2c") +
+      r(4, 7, 8, 4, "#ff3552") +
+      r(6, 6, 4, 4, "#ffd447") +
+      r(7, 8, 2, 3, "#ffffff") +
+      r(3, 11, 3, 2, "#ff8b2c") +
+      r(10, 11, 3, 2, "#ff8b2c") +
+      r(6, 12, 4, 2, "#ffd447")
+  ),
+  "应急电容": svg(
+    r(2, 2, 12, 12, "#060912") +
+      r(3, 3, 10, 7, "#3aa8ff") +
+      r(4, 10, 8, 2, "#3aa8ff") +
+      r(6, 12, 4, 2, "#1e73cc") +
+      r(4, 4, 8, 5, "#152544") +
+      r(7, 4, 2, 2, "#ffd447") +
+      r(6, 6, 4, 1, "#fff2b2") +
+      r(7, 7, 2, 3, "#ffd447") +
+      r(3, 3, 2, 2, "#9de2ff")
+  ),
+  "磁力超频": svg(
+    r(3, 4, 10, 10, "#060912") +
+      r(4, 5, 2, 3, "#c4d2e8") +
+      r(10, 5, 2, 3, "#c4d2e8") +
+      r(4, 8, 2, 4, "#ff3552") +
+      r(10, 8, 2, 4, "#ff3552") +
+      r(5, 11, 6, 2, "#ff3552") +
+      r(6, 10, 4, 1, "#ffd447") +
+      r(4, 2, 2, 2, "#38e4d4") +
+      r(10, 2, 2, 2, "#38e4d4") +
+      r(7, 1, 2, 2, "#9ef7ff")
+  ),
+
+第九空域游戏软件 V1.0                                      第 51 页 / 共 60 页
+==============================================================================
+};
+const FALLBACK_UPGRADE_ICON = svg(
+  r(3, 3, 10, 10, "#060912") +
+    r(7, 2, 2, 12, "#ffd447") +
+    r(2, 7, 12, 2, "#ffd447") +
+    r(5, 5, 6, 6, "#38e4d4") +
+    r(7, 7, 2, 2, "#ffffff")
+);
+const ACTION_ICONS = {
+  resume: svg(
+    r(4, 2, 2, 12, "currentColor") +
+      r(6, 3, 2, 10, "currentColor") +
+      r(8, 4, 2, 8, "currentColor") +
+      r(10, 6, 2, 4, "currentColor") +
+      r(12, 7, 1, 2, "currentColor")
+  ),
+  "sound-on": svg(
+    r(2, 6, 3, 4, "currentColor") +
+      r(5, 4, 2, 8, "currentColor") +
+      r(7, 2, 2, 12, "currentColor") +
+      r(11, 5, 1, 6, "#38e4d4") +
+      r(13, 3, 1, 10, "#ffd447")
+  ),
+  "sound-off": svg(
+    r(2, 6, 3, 4, "currentColor") +
+      r(5, 4, 2, 8, "currentColor") +
+      r(7, 2, 2, 12, "currentColor") +
+      r(11, 5, 1, 1, "#ff3552") +
+      r(14, 5, 1, 1, "#ff3552") +
+      r(12, 6, 2, 4, "#ff3552") +
+      r(11, 10, 1, 1, "#ff3552") +
+      r(14, 10, 1, 1, "#ff3552")
+  ),
+  retry: svg(
+    r(5, 2, 6, 2, "currentColor") +
+      r(3, 4, 2, 6, "currentColor") +
+      r(5, 10, 6, 2, "currentColor") +
+      r(11, 6, 2, 4, "currentColor") +
+      r(10, 2, 3, 3, "#ffd447") +
+      r(12, 4, 2, 1, "#ffd447")
+  ),
+  hangar: svg(
+    r(7, 2, 2, 2, "#38e4d4") +
+      r(5, 4, 6, 2, "currentColor") +
+      r(3, 6, 10, 2, "currentColor") +
+      r(4, 8, 8, 5, "currentColor") +
+      r(6, 10, 4, 3, "#060912")
+  ),
+  trophy: svg(
+    r(4, 2, 8, 2, "#ffd447") +
+      r(2, 3, 2, 4, "#ff8b2c") +
+      r(12, 3, 2, 4, "#ff8b2c") +
+
+第九空域游戏软件 V1.0                                      第 52 页 / 共 60 页
+==============================================================================
+      r(4, 4, 8, 4, "#ffd447") +
+      r(5, 4, 2, 3, "#fff2b2") +
+      r(6, 8, 4, 2, "#ff8b2c") +
+      r(7, 10, 2, 2, "#ffd447") +
+      r(4, 12, 8, 2, "#c4d2e8")
+  ),
+  lock: svg(
+    r(5, 2, 6, 2, "currentColor") +
+      r(4, 4, 2, 3, "currentColor") +
+      r(10, 4, 2, 3, "currentColor") +
+      r(3, 7, 10, 7, "currentColor") +
+      r(7, 9, 2, 3, "#060912")
+  ),
+};
+export function getUpgradeIconSvg(cardId) {
+  return UPGRADE_ICONS[cardId] ?? FALLBACK_UPGRADE_ICON;
+}
+export function getActionIconSvg(name) {
+  return ACTION_ICONS[name] ?? "";
+}
+import { WAVE_COUNT } from "../core/stage-director.js";
+import { PILOT_LORE } from "../core/pilot-lore.js";
+import { SECONDARIES } from "../core/upgrade-cards.js";
+import { computeRunRank, recordRunResult } from "../state/records.js";
+import { getActionIconSvg, getUpgradeIconSvg } from "./pixel-icons.js";
+const SEC_LABELS = Object.fromEntries(SECONDARIES.map((s) => [s.id, s.label.slice(0, 2)]));
+const HP_SEGS = 12;
+export class SoloHud {
+  constructor({ onOverload, onPause, onUpgrade, onRetry, onMenu, onMute, isMuted }) {
+    this.root = document.querySelector("#solo-ui");
+    this.root.innerHTML = `
+      <section class="solo-flight" aria-label="战斗状态">
+        <header class="solo-telemetry">
+          <div class="solo-meters-col">
+            <div class="solo-hp-row">
+              <span class="solo-tag">HP</span>
+              <div class="solo-hp-segs" aria-hidden="true">${Array.from({ length: HP_SEGS }, () => "<i></i>").join("")}</div>
+              <b class="solo-hp-num" data-hp-label></b>
+            </div>
+            <div class="solo-sub-bars">
+              <div class="solo-meter solo-shield"><i></i></div>
+              <div class="solo-meter solo-xp"><i></i></div>
+              <span class="solo-lv-tag" data-xp-label></span>
+            </div>
+          </div>
+          <div class="solo-stage">
+            <span data-wave></span>
+            <b data-time></b>
+          </div>
+          <div class="solo-right-col">
+            <div class="solo-score-row">
+              <span class="solo-score" data-score>00,000,000</span>
+
+第九空域游戏软件 V1.0                                      第 53 页 / 共 60 页
+==============================================================================
+              <button type="button" class="solo-sound solo-battle-sound" aria-label="静音"></button>
+              <button type="button" class="solo-pause" aria-label="暂停">Ⅱ</button>
+            </div>
+            <div class="solo-combo" data-combo hidden></div>
+          </div>
+        </header>
+        <div class="solo-status-strip">
+          <div class="solo-breach" hidden aria-label="防线警戒">
+            <span>防线</span>
+            <div class="solo-breach-pips" aria-hidden="true">${Array.from({ length: 5 }, () => "<i></i>").join("")}</div>
+          </div>
+          <span class="solo-mutator" hidden></span>
+          <span class="solo-fever-tag" hidden>FEVER ×1.25</span>
+        </div>
+        <div class="solo-boss-status" hidden aria-label="首领部位状态">
+          ${[["left", "左翼炮"], ["core", "中央核心"], ["right", "右翼炮"]].map(([id, label]) =>
+            `<div data-part="${id}"><span>${label}</span><div><i></i></div></div>`).join("")}
+        </div>
+        <div class="solo-announcement" role="status"></div>
+        <div class="solo-ach-toast" hidden role="status" aria-live="polite"></div>
+        <div class="solo-boss-alert" role="status" hidden>护盾展开 · 狂暴系统启动</div>
+        <div class="solo-beam-warning" role="status" hidden>高能激光锁定 · 横向闪避</div>
+        <div class="solo-loadout" aria-label="当前构筑"></div>
+        <div class="solo-bottom-dock">
+          <button type="button" class="solo-overload" disabled>
+            <span class="solo-od-ring"></span>
+            <span class="solo-od-core">
+              <strong>OVERDRIVE</strong>
+              <b>0%</b>
+            </span>
+          </button>
+          <aside class="solo-comms" hidden aria-live="polite">
+            <img class="solo-comms-img" alt="" draggable="false">
+            <div class="solo-comms-body">
+              <em class="solo-comms-speaker"></em>
+              <p class="solo-comms-line"></p>
+            </div>
+          </aside>
+        </div>
+      </section>
+      <div class="solo-dialog-wrap" hidden></div>`;
+    this.flight = this.root.querySelector(".solo-flight");
+    this.dialog = this.root.querySelector(".solo-dialog-wrap");
+    this.notice = this.root.querySelector(".solo-announcement");
+    this.achToast = this.root.querySelector(".solo-ach-toast");
+    this.breachBox = this.root.querySelector(".solo-breach");
+    this.breachPips = [...this.root.querySelectorAll(".solo-breach-pips i")];
+    this.mutatorTag = this.root.querySelector(".solo-mutator");
+    this.feverTag = this.root.querySelector(".solo-fever-tag");
+    this.bossRow = this.root.querySelector(".solo-boss-status");
+    this.alert = this.root.querySelector(".solo-boss-alert");
+    this.beamWarning = this.root.querySelector(".solo-beam-warning");
+
+第九空域游戏软件 V1.0                                      第 54 页 / 共 60 页
+==============================================================================
+    this.combo = this.root.querySelector("[data-combo]");
+    this.overload = this.root.querySelector(".solo-overload");
+    this.loadout = this.root.querySelector(".solo-loadout");
+    this.hpSegs = [...this.root.querySelectorAll(".solo-hp-segs i")];
+    this.comms = this.root.querySelector(".solo-comms");
+    this.commsImg = this.root.querySelector(".solo-comms-img");
+    this.commsSpeaker = this.root.querySelector(".solo-comms-speaker");
+    this.commsLine = this.root.querySelector(".solo-comms-line");
+    this.pause = this.root.querySelector(".solo-pause");
+    this.sound = this.root.querySelector(".solo-sound");
+    this.overload.addEventListener("click", onOverload);
+    this.pause.addEventListener("click", onPause);
+    this.sound.addEventListener("click", () => this.#toggleMute());
+    this.actions = { onPause, onUpgrade, onRetry, onMenu, onMute, isMuted };
+    this.lastValues = {};
+    this.commsShown = new Set();
+    this.onKeyDown = (event) => {
+      if (this.dialog.hidden) return;
+      if (this.lastValues.phase === "upgrade" && ["1", "2", "3"].includes(event.key)) {
+        const buttons = this.dialog.querySelectorAll("[data-upgrade]");
+        const target = buttons[Number(event.key) - 1];
+        if (target) {
+          event.preventDefault();
+          target.click();
+        }
+      } else if (this.lastValues.phase === "paused" && event.key === "Escape") {
+        event.preventDefault();
+        this.actions.onPause();
+      }
+    };
+    window.addEventListener("keydown", this.onKeyDown);
+    this.#syncSound();
+  }
+  render(combat, revealResult = true) {
+    const s = combat.session;
+    const active = s.phase === "playing";
+    const waveLabel = s.mode === "endless"
+      ? (combat.boss ? `L${s.loop}·BOSS` : `L${s.loop}·S${s.stage}·W${s.wave}`)
+      : (combat.boss ? "BOSS" : `S${s.stage}·W${s.wave}`);
+    this.#text("[data-wave]", waveLabel);
+    const seconds = Math.floor(s.elapsedMs / 1000);
+    this.#text("[data-time]", `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`);
+    this.#text("[data-hp-label]", `${Math.ceil(s.hp)}/${s.maxHp}`);
+    this.#text("[data-xp-label]", `LV.${s.level}`);
+    const hpRatio = s.maxHp > 0 ? s.hp / s.maxHp : 0;
+    const lit = Math.ceil(hpRatio * HP_SEGS);
+    if (this.lastValues.lit !== lit) {
+      this.hpSegs.forEach((seg, idx) => seg.classList.toggle("on", idx < lit));
+      this.lastValues.lit = lit;
+    }
+    this.#fill(".solo-shield i", s.guard ? 1 : Math.min(1, s.shield / 35));
+    this.#fill(".solo-xp i", s.xp / s.xpNeeded);
+
+第九空域游戏软件 V1.0                                      第 55 页 / 共 60 页
+==============================================================================
+    const breach = s.breachMeter ?? 0;
+    this.breachBox.hidden = breach <= 0;
+    if (this.lastValues.breach !== breach) {
+      this.breachPips.forEach((pip, idx) => pip.classList.toggle("on", idx < breach));
+      this.lastValues.breach = breach;
+    }
+    this.mutatorTag.hidden = !s.mutator;
+    if (s.mutator) this.#text(".solo-mutator", `词缀 · ${s.mutator.label}`);
+    this.feverTag.hidden = !(s.feverUntil > s.elapsedMs);
+    const { score } = computeRunRank(s);
+    this.#text("[data-score]", String(score).padStart(8, "0").replace(/(\d{2})(\d{3})(\d{3})/, "$1,$2,$3"));
+    const comboText = `COMBO ×${s.combo}`;
+    if (this.lastValues["[data-combo]"] !== comboText) {
+      this.combo.textContent = comboText;
+      this.lastValues["[data-combo]"] = comboText;
+      if (s.combo >= 2) {
+        this.combo.classList.remove("pop");
+        void this.combo.offsetWidth;
+        this.combo.classList.add("pop");
+      }
+    }
+    this.combo.hidden = s.combo < 2;
+    this.bossRow.hidden = !combat.boss;
+    this.alert.hidden = !combat.boss || combat.boss.shieldUntil <= s.elapsedMs;
+    this.beamWarning.hidden = combat.boss?.laser?.phase !== "charge";
+    if (combat.boss) {
+      for (const part of combat.boss.parts) {
+        const selector = `[data-part="${part.id}"]`;
+        this.#text(selector + " span", part.hp > 0 ? part.label : part.label + " · 已毁");
+        this.#fill(selector + " i", part.hp / part.maxHp);
+      }
+    }
+    const energy = Math.floor(s.energy);
+    this.#text(".solo-od-core b", energy >= 100 ? "READY" : `${energy}%`);
+    if (this.lastValues.energy !== energy) {
+      this.overload.style.setProperty("--charge", `${energy}%`);
+      this.lastValues.energy = energy;
+    }
+    this.overload.disabled = !active || s.energy < 100;
+    this.pause.disabled = !active;
+    this.flight.inert = !active;
+    this.#syncLoadout(s);
+    if (!this.commsShown.has("sortie")) {
+      this.commsShown.add("sortie");
+      this.#showComms(s.fighterId, "sortie", 4200);
+    }
+    if (s.wave >= 4 && !this.commsShown.has("waveMid")) {
+      this.commsShown.add("waveMid");
+      this.#showComms(s.fighterId, "waveMid", 3800);
+    }
+    const newCards = s.phase === "upgrade" && s.cards !== this.lastValues.cards;
+    if (revealResult && (s.phase !== this.lastValues.phase || newCards)) {
+
+第九空域游戏软件 V1.0                                      第 56 页 / 共 60 页
+==============================================================================
+      this.lastValues.phase = s.phase;
+      this.lastValues.cards = s.cards;
+      this.#showDialog(s);
+    }
+    for (const event of combat.events) {
+      if (event.type === "wave") this.announce(`STAGE ${s.stage} · WAVE ${s.wave} · ${event.label}`, 1350);
+      if (event.type === "boss") {
+        this.announce("WARNING · 敌方主力旗舰接近", 2200, "danger");
+        this.#showComms(s.fighterId, "bossIntro", 4500);
+      }
+      if (event.type === "part-break") this.announce(`${event.label} 击破`, 1150, "danger");
+      if (event.type === "evolution") this.announce(`超武觉醒 · ${event.label}`, 2150, "evolution");
+      if (event.type === "bounty-start") this.announce("限时悬赏 · 黄金运输舰出现", 1800, "evolution");
+      if (event.type === "bounty-clear") this.announce("悬赏达成 · 战术空投已发放", 1800, "evolution");
+      if (event.type === "breach-alarm") this.announce("WARNING · 防线失守 · 追猎精英降临", 2000, "danger");
+      if (event.type === "mutator") this.announce(`星域词缀 · ${event.label}`, 2000, "evolution");
+      if (event.type === "achievement") this.#showAchievement(event);
+      if (event.type === "overload") {
+        this.announce(s.overload.name, 950);
+        this.#showComms(s.fighterId, "overload", 3000);
+      }
+    }
+  }
+  #showAchievement(ach) {
+    this.achToast.dataset.tier = ach.tier;
+    this.achToast.innerHTML = `
+      <span class="solo-ach-icon">${getActionIconSvg("trophy")}</span>
+      <div><em>ACHIEVEMENT UNLOCKED</em><strong>${ach.title}</strong><small>${ach.desc}</small></div>`;
+    this.achToast.hidden = false;
+    this.achToast.classList.remove("show");
+    void this.achToast.offsetWidth;
+    this.achToast.classList.add("show");
+    clearTimeout(this.achTimer);
+    this.achTimer = setTimeout(() => {
+      this.achToast.classList.remove("show");
+      this.achToast.hidden = true;
+    }, 3200);
+  }
+  #showComms(fighterId, key, duration) {
+    const lore = PILOT_LORE[fighterId];
+    if (!lore) return;
+    this.commsImg.src = import.meta.env.BASE_URL + `assets/pilots/${fighterId}.png`;
+    this.commsSpeaker.textContent = `${lore.callsign} · ${lore.pilot}`;
+    this.commsLine.textContent = lore.lines[key] ?? "";
+    this.comms.hidden = false;
+    this.comms.classList.remove("show");
+    void this.comms.offsetWidth;
+    this.comms.classList.add("show");
+    clearTimeout(this.commsTimer);
+    this.commsTimer = setTimeout(() => {
+      this.comms.classList.remove("show");
+      this.comms.hidden = true;
+
+第九空域游戏软件 V1.0                                      第 57 页 / 共 60 页
+==============================================================================
+    }, duration);
+  }
+  announce(text, duration, variant = "") {
+    this.notice.textContent = text;
+    this.notice.dataset.variant = variant;
+    this.notice.classList.remove("show");
+    void this.notice.offsetWidth;
+    this.notice.classList.add("show");
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = setTimeout(() => this.notice.classList.remove("show"), duration);
+  }
+  #syncSound() {
+    const muted = this.actions.isMuted();
+    this.sound.textContent = muted ? "静音" : "音效";
+    this.sound.setAttribute("aria-label", muted ? "开启音效" : "静音");
+    this.sound.setAttribute("aria-pressed", String(muted));
+    const dialogMute = this.dialog.querySelector("[data-mute]");
+    if (dialogMute) {
+      dialogMute.innerHTML = `
+        <span class="solo-btn-icon">${getActionIconSvg(muted ? "sound-off" : "sound-on")}</span>
+        <span class="solo-btn-label">${muted ? "音效系统 · 已静音" : "音效系统 · 开启"}</span>
+        <span class="solo-led ${muted ? "off" : "on"}" aria-hidden="true"></span>`;
+      dialogMute.setAttribute("aria-label", muted ? "开启音效" : "静音");
+      dialogMute.setAttribute("aria-pressed", String(muted));
+    }
+  }
+  #toggleMute() {
+    this.actions.onMute();
+    this.#syncSound();
+  }
+  #syncLoadout(s) {
+    const b = s.build;
+    const chips = [`<span>主炮 Lv.${b.main}</span>`];
+    for (const [id, lv] of Object.entries(b.secondary)) {
+      chips.push(`<span class="sec">${SEC_LABELS[id] ?? id} ${lv}</span>`);
+    }
+    if (b.synergy) chips.push(`<span class="syn">超武 · ${b.synergy.name}</span>`);
+    const html = chips.join("");
+    if (this.lastValues.loadout !== html) {
+      this.loadout.innerHTML = html;
+      this.lastValues.loadout = html;
+    }
+  }
+  #text(selector, text) {
+    if (this.lastValues[selector] === text) return;
+    this.root.querySelector(selector).textContent = text;
+    this.lastValues[selector] = text;
+  }
+  #fill(selector, ratio) {
+    if (this.lastValues[selector] === ratio) return;
+    this.root.querySelector(selector).style.transform = `scaleX(${Math.max(0, Math.min(1, ratio))})`;
+    this.lastValues[selector] = ratio;
+
+第九空域游戏软件 V1.0                                      第 58 页 / 共 60 页
+==============================================================================
+  }
+  #renderRankPips(level, max = 5) {
+    const cells = Array.from({ length: max }, (_, i) => {
+      const state = i < level - 1 ? "on" : i === level - 1 ? "next" : "off";
+      return `<i class="${state}"></i>`;
+    }).join("");
+    return `<span class="solo-pips" aria-hidden="true">${cells}</span>`;
+  }
+  #showDialog(s) {
+    if (s.phase === "playing") {
+      this.dialog.hidden = true;
+      this.dialog.replaceChildren();
+      return;
+    }
+    const { onUpgrade, onPause, onRetry, onMenu } = this.actions;
+    const lore = PILOT_LORE[s.fighterId];
+    const base = import.meta.env.BASE_URL;
+    let markup;
+    if (s.phase === "upgrade") {
+      markup = `
+        <header class="solo-dialog-bar">
+          <span class="solo-bar-code"><i class="solo-led on" aria-hidden="true"></i>ARMORY // LV.${s.level}</span>
+          <span class="solo-bar-meta">主炮 RANK ${s.build.main}</span>
+        </header>
+        <div class="solo-dialog-head">
+          <img class="solo-dialog-pilot" src="${base}assets/pilots/${s.fighterId}.png" alt="" draggable="false">
+          <div class="solo-dialog-titles">
+            <p class="solo-dialog-kicker">${lore?.callsign ?? "UNIT"} · 战备扩容</p>
+            <h2 id="solo-dialog-title">战术强化模块</h2>
+          </div>
+        </div>
+        <div class="solo-upgrades">
+          ${s.cards.map(({ id, label, detail, kind, level, resonance }, idx) => {
+            const iconHtml = id === "main"
+              ? `<img class="solo-card-ship" src="${base}assets/fighters/${s.fighterId}.png" alt="" draggable="false">`
+              : getUpgradeIconSvg(id);
+            return `
+            <button type="button" data-upgrade="${id}" data-card="${kind}" data-resonance="${resonance ? "true" : "false"}" style="--deal-i: ${idx}">
+              <div class="solo-card-icon">
+                ${iconHtml}
+                <span class="solo-card-lv">LV.${level || 1}</span>
+              </div>
+              <div class="solo-card-body">
+                <div class="solo-card-meta">
+                  <em class="solo-card-tag">${kind}</em>
+                  ${this.#renderRankPips(level || 1, 5)}
+                </div>
+                <strong>${label}</strong>
+                <small>${detail}</small>
+                ${resonance ? `<span class="solo-card-res">⚡ 共振觉醒 · ${resonance}</span>` : ""}
+              </div>
+              <div class="solo-card-act" aria-hidden="true">
+
+第九空域游戏软件 V1.0                                      第 59 页 / 共 60 页
+==============================================================================
+                <kbd>${idx + 1}</kbd>
+                <span>装配</span>
+              </div>
+            </button>`;
+          }).join("")}
+        </div>
+        <footer class="solo-dialog-foot"><span>点选卡片或按 [1][2][3] 立即装配</span></footer>`;
+    } else if (s.phase === "paused") {
+      const modCount = Object.keys(s.build.secondary).length;
+      const { score } = computeRunRank(s);
+      markup = `
+        <header class="solo-dialog-bar">
+          <span class="solo-bar-code"><i class="solo-led pause" aria-hidden="true"></i>HOLD // SYSTEM PAUSED</span>
+          <span class="solo-bar-meta">S${s.stage}·W${s.wave}</span>
+        </header>
+        <div class="solo-dialog-head">
+          <img class="solo-dialog-pilot" src="${base}assets/pilots/${s.fighterId}.png" alt="" draggable="false">
+          <div class="solo-dialog-titles">
+            <p class="solo-dialog-kicker">TACTICAL STANDBY</p>
+            <h2 id="solo-dialog-title">战斗暂停</h2>
+          </div>
+        </div>
+        <div class="solo-pause-telemetry">
+          <img class="solo-pause-ship" src="${base}assets/fighters/${s.fighterId}.png" alt="" draggable="false">
+          <div class="solo-pause-unit">
+            <strong>${lore ? `${lore.callsign} · ${lore.pilot}` : s.fighterId}</strong>
+            <span>主炮 Lv.${s.build.main} · 模组 ${modCount}</span>
+          </div>
+          <div class="solo-pause-score">
+            <em>SCORE</em>
+            <b>${score.toLocaleString()}</b>
+          </div>
+        </div>
+        <div class="solo-dialog-actions">
+          <button class="solo-primary solo-arcade-btn" type="button" data-resume>
+            <span class="solo-btn-icon">${getActionIconSvg("resume")}</span>
+            <span class="solo-btn-label">继续战斗</span>
+            <span class="solo-launch-arrow" aria-hidden="true">▶</span>
+          </button>
+          <button class="solo-secondary solo-arcade-btn" type="button" data-mute></button>
+          <button class="solo-secondary solo-arcade-btn" type="button" data-menu>
+            <span class="solo-btn-icon">${getActionIconSvg("hangar")}</span>
+            <span class="solo-btn-label">返回机库整备</span>
+          </button>
+        </div>
+        <footer class="solo-dialog-foot"><span>按 [ESC] 或点击上方按钮恢复作战</span></footer>`;
+    } else {
+      const { rank, score } = recordRunResult(s);
+      const isWin = s.phase === "victory";
+      markup = `
+        <header class="solo-dialog-bar">
+          <span class="solo-bar-code"><i class="solo-led ${isWin ? "on" : "off"}" aria-hidden="true"></i>${isWin ? "MISSION CLEAR" : "SIGNAL LOST"}</span>
+
+第九空域游戏软件 V1.0                                      第 60 页 / 共 60 页
+==============================================================================
+          <span class="solo-bar-meta">${score.toLocaleString()} PTS</span>
+        </header>
+        <div class="solo-result-head">
+          <div class="solo-dialog-head">
+            <img class="solo-dialog-pilot" src="${base}assets/pilots/${s.fighterId}.png" alt="" draggable="false">
+            <div class="solo-dialog-titles">
+              <p class="solo-dialog-kicker">${lore ? `${lore.callsign} · ${lore.pilot}` : "DEBRIEF"}</p>
+              <h2 id="solo-dialog-title">${isWin ? "星域制霸" : "战机坠毁"}</h2>
+            </div>
+          </div>
+          <span class="solo-rank-stamp rank-${rank}">${rank}</span>
+        </div>
+        ${isWin && lore ? `<p class="solo-victory-quote">「${lore.lines.victory}」—— ${lore.pilot}</p>` : ""}
+        <dl class="solo-results">
+          <div><dt>击破</dt><dd>${s.kills}</dd></div>
+          <div><dt>最高连击</dt><dd>${s.bestCombo}</dd></div>
+          <div><dt>擦弹</dt><dd>${s.grazes}</dd></div>
+          <div><dt>零件</dt><dd>${s.parts}</dd></div>
+        </dl>
+        <div class="solo-dialog-actions">
+          <button class="solo-primary solo-arcade-btn" type="button" data-retry>
+            <span class="solo-btn-icon">${getActionIconSvg("retry")}</span>
+            <span class="solo-btn-label">再次出击</span>
+            <span class="solo-launch-arrow" aria-hidden="true">▶</span>
+          </button>
+          <button class="solo-secondary solo-arcade-btn" type="button" data-menu>
+            <span class="solo-btn-icon">${getActionIconSvg("hangar")}</span>
+            <span class="solo-btn-label">返回机库整备</span>
+          </button>
+        </div>`;
+    }
+    this.dialog.hidden = false;
+    this.dialog.innerHTML = `<section class="solo-dialog" data-kind="${s.phase}" role="dialog" aria-modal="true"
+      aria-labelledby="solo-dialog-title" tabindex="-1">${markup}</section>`;
+    this.dialog.querySelectorAll("[data-upgrade]").forEach((button) => {
+      button.addEventListener("click", () => onUpgrade(button.dataset.upgrade));
+    });
+    this.dialog.querySelector("[data-resume]")?.addEventListener("click", onPause);
+    this.dialog.querySelector("[data-mute]")?.addEventListener("click", () => this.#toggleMute());
+    this.dialog.querySelector("[data-menu]")?.addEventListener("click", onMenu);
+    this.dialog.querySelector("[data-retry]")?.addEventListener("click", onRetry);
+    this.#syncSound();
+    this.dialog.firstElementChild.focus({ preventScroll: true });
+  }
+  destroy() {
+    clearTimeout(this.noticeTimer);
+    clearTimeout(this.commsTimer);
+    clearTimeout(this.achTimer);
+    window.removeEventListener("keydown", this.onKeyDown);
+    this.root.replaceChildren();
+  }
+}
