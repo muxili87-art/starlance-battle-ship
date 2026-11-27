@@ -1,0 +1,357 @@
+{
+  "fighters": [
+    {
+      "id": "01_chifeng",
+      "cnName": "赤锋",
+      "role": "力量 · 高单发穿甲",
+      "category": "fighter",
+      "path": "assets/fighters/01_chifeng.png",
+      "width": 242,
+      "height": 203,
+      "facing": "up"
+    },
+    {
+      "id": "02_jifeng",
+      "cnName": "疾风",
+      "role": "速度 · 高机动高射速",
+      "category": "fighter",
+      "path": "assets/fighters/02_jifeng.png",
+      "width": 228,
+      "height": 203,
+      "facing": "up"
+    },
+    {
+      "id": "03_leiting",
+      "cnName": "雷霆",
+      "role": "雷电 · 连锁闪电",
+      "category": "fighter",
+      "path": "assets/fighters/03_leiting.png",
+      "width": 255,
+      "height": 203,
+      "facing": "up"
+    },
+    {
+      "id": "04_fusu",
+      "cnName": "复苏",
+      "role": "生命 · 击杀回血狂战",
+      "category": "fighter",
+      "path": "assets/fighters/04_fusu.png",
+      "width": 258,
+      "height": 198,
+      "facing": "up"
+    },
+    {
+      "id": "05_lieyang",
+      "cnName": "烈阳",
+      "role": "爆破 · 范围连锁殉爆",
+      "category": "fighter",
+      "path": "assets/fighters/05_lieyang.png",
+      "width": 251,
+      "height": 198,
+      "facing": "up"
+    },
+    {
+      "id": "06_xukong",
+      "cnName": "虚空",
+      "role": "引力 · 黑洞聚怪坍缩",
+      "category": "fighter",
+      "path": "assets/fighters/06_xukong.png",
+      "width": 254,
+      "height": 198,
+      "facing": "up"
+    },
+    {
+      "id": "07_hanxing",
+      "cnName": "寒星",
+      "role": "冰冻 · 减速冻结碎冰",
+      "category": "fighter",
+      "path": "assets/fighters/07_hanxing.png",
+      "width": 253,
+      "height": 205,
+      "facing": "up"
+    },
+    {
+      "id": "08_tiandun",
+      "cnName": "天盾",
+      "role": "防御 · 护盾反震清弹",
+      "category": "fighter",
+      "path": "assets/fighters/08_tiandun.png",
+      "width": 274,
+      "height": 205,
+      "facing": "up"
+    },
+    {
+      "id": "09_fengqun",
+      "cnName": "蜂群",
+      "role": "召唤 · 追踪无人机海",
+      "category": "fighter",
+      "path": "assets/fighters/09_fengqun.png",
+      "width": 256,
+      "height": 205,
+      "facing": "up"
+    }
+  ],
+  "pilots": [
+    {
+      "id": "01_chifeng",
+      "cnName": "赤锋",
+      "path": "assets/pilots/01_chifeng.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "02_jifeng",
+      "cnName": "疾风",
+      "path": "assets/pilots/02_jifeng.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "03_leiting",
+      "cnName": "雷霆",
+      "path": "assets/pilots/03_leiting.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "04_fusu",
+      "cnName": "复苏",
+      "path": "assets/pilots/04_fusu.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "05_lieyang",
+      "cnName": "烈阳",
+      "path": "assets/pilots/05_lieyang.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "06_xukong",
+      "cnName": "虚空",
+      "path": "assets/pilots/06_xukong.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "07_hanxing",
+      "cnName": "寒星",
+      "path": "assets/pilots/07_hanxing.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "08_tiandun",
+      "cnName": "天盾",
+      "path": "assets/pilots/08_tiandun.png",
+      "width": 96,
+      "height": 96
+    },
+    {
+      "id": "09_fengqun",
+      "cnName": "蜂群",
+      "path": "assets/pilots/09_fengqun.png",
+      "width": 96,
+      "height": 96
+    }
+  ],
+  "enemies": [
+    {
+      "id": "normal_light_fighter",
+      "cnName": "轻型战机",
+      "role": "基础俯冲单位",
+      "category": "normal",
+      "path": "assets/enemies/normal_light_fighter.png",
+      "width": 40,
+      "height": 39,
+      "facing": "down"
+    },
+    {
+      "id": "normal_scout",
+      "cnName": "侦察机",
+      "role": "高速S型穿插",
+      "category": "normal",
+      "path": "assets/enemies/normal_scout.png",
+      "width": 49,
+      "height": 40,
+      "facing": "down"
+    },
+    {
+      "id": "normal_gunner",
+      "cnName": "火力机",
+      "role": "双发直射弹",
+      "category": "normal",
+      "path": "assets/enemies/normal_gunner.png",
+      "width": 44,
+      "height": 40,
+      "facing": "down"
+    },
+    {
+      "id": "normal_interceptor",
+      "cnName": "拦截机",
+      "role": "斜向封锁切入",
+      "category": "normal",
+      "path": "assets/enemies/normal_interceptor.png",
+      "width": 56,
+      "height": 40,
+      "facing": "down"
+    },
+    {
+      "id": "normal_rusher",
+      "cnName": "速攻机",
+      "role": "高机动突袭",
+      "category": "normal",
+      "path": "assets/enemies/normal_rusher.png",
+      "width": 29,
+      "height": 43,
+      "facing": "down"
+    },
+    {
+      "id": "normal_bomber",
+      "cnName": "自爆机",
+      "role": "近身自爆威胁",
+      "category": "normal",
+      "path": "assets/enemies/normal_bomber.png",
+      "width": 46,
+      "height": 43,
+      "facing": "down"
+    },
+    {
+      "id": "elite_fighter",
+      "cnName": "精英战机",
+      "role": "高血量连射",
+      "category": "elite",
+      "path": "assets/enemies/elite_fighter.png",
+      "width": 72,
+      "height": 57,
+      "facing": "down"
+    },
+    {
+      "id": "elite_shield",
+      "cnName": "护盾机",
+      "role": "双弧能量护盾",
+      "category": "elite",
+      "path": "assets/enemies/elite_shield.png",
+      "width": 66,
+      "height": 57,
+      "facing": "down"
+    },
+    {
+      "id": "elite_missile",
+      "cnName": "导弹机",
+      "role": "发射追踪导弹",
+      "category": "elite",
+      "path": "assets/enemies/elite_missile.png",
+      "width": 63,
+      "height": 49,
+      "facing": "down"
+    },
+    {
+      "id": "elite_spread",
+      "cnName": "散射机",
+      "role": "扇形弹幕压制",
+      "category": "elite",
+      "path": "assets/enemies/elite_spread.png",
+      "width": 76,
+      "height": 48,
+      "facing": "down"
+    },
+    {
+      "id": "elite_jammer",
+      "cnName": "干扰机",
+      "role": "电磁脉冲光环",
+      "category": "elite",
+      "path": "assets/enemies/elite_jammer.png",
+      "width": 69,
+      "height": 57,
+      "facing": "down"
+    },
+    {
+      "id": "medium_transport",
+      "cnName": "武装运输机",
+      "role": "掉落大量晶体/补给",
+      "category": "medium",
+      "path": "assets/enemies/medium_transport.png",
+      "width": 94,
+      "height": 53,
+      "facing": "down"
+    },
+    {
+      "id": "medium_gunship",
+      "cnName": "炮艇",
+      "role": "双侧连续压制火力",
+      "category": "medium",
+      "path": "assets/enemies/medium_gunship.png",
+      "width": 112,
+      "height": 57,
+      "facing": "down"
+    },
+    {
+      "id": "medium_fortress",
+      "cnName": "空中堡垒",
+      "role": "高护甲区域压制",
+      "category": "medium",
+      "path": "assets/enemies/medium_fortress.png",
+      "width": 105,
+      "height": 61,
+      "facing": "down"
+    },
+    {
+      "id": "medium_launcher",
+      "cnName": "发射平台",
+      "role": "多管导弹齐射",
+      "category": "medium",
+      "path": "assets/enemies/medium_launcher.png",
+      "width": 101,
+      "height": 51,
+      "facing": "down"
+    }
+  ],
+  "bosses": [
+    {
+      "id": "boss_marshal",
+      "cnName": "拦截统帅",
+      "role": "第1关Boss · 灵活多武装切换",
+      "category": "boss",
+      "path": "assets/bosses/boss_marshal.png",
+      "width": 149,
+      "height": 102,
+      "facing": "down"
+    },
+    {
+      "id": "boss_citadel",
+      "cnName": "重装要塞",
+      "role": "第2关Boss · 高耐久部位破坏",
+      "category": "boss",
+      "path": "assets/bosses/boss_citadel.png",
+      "width": 145,
+      "height": 107,
+      "facing": "down"
+    },
+    {
+      "id": "boss_overmind",
+      "cnName": "核心主脑",
+      "role": "第3关Boss · 多阶段全屏弹幕",
+      "category": "boss",
+      "path": "assets/bosses/boss_overmind.png",
+      "width": 163,
+      "height": 111,
+      "facing": "down"
+    }
+  ],
+  "backgrounds": [
+    {
+      "id": "stage1_carrier",
+      "path": "assets/backgrounds/stage1_carrier.png"
+    },
+    {
+      "id": "stage2_asteroid",
+      "path": "assets/backgrounds/stage2_asteroid.png"
+    },
+    {
+      "id": "stage3_overmind",
+      "path": "assets/backgrounds/stage3_overmind.png"
+    }
+  ]
+}

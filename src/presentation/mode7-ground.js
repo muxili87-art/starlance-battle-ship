@@ -1,106 +1,70 @@
-/**
- * Deep-Space 3D Perspective Star-Depth & Dithered Nebula Backdrop:
- * - Zero jagged road/track cones or flat solid stripes
- * - Pixel-dithered cosmic nebula ribbon + subtle 3D depth star-waypoints
- */
+import Phaser from "phaser";
+
+const STAGE_BG_KEYS = {
+  1: "stage1_carrier",
+  2: "stage2_asteroid",
+  3: "stage3_overmind",
+};
+
 export class Mode7Ground {
   constructor(scene) {
     this.scene = scene;
-    this.w = 180;
-    this.h = 260;
-    this.horizonY = 26;
-    this.scrollZ = 0;
-
-    if (!scene.textures.exists("mode7-ground")) {
-      this.tex = scene.textures.createCanvas("mode7-ground", this.w, this.h);
-      this.tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-    } else {
-      this.tex = scene.textures.get("mode7-ground");
-    }
-
-    this.sprite = scene.add
-      .image(360, 760, "mode7-ground")
-      .setDisplaySize(720, 1040)
-      .setDepth(1);
-    this.imgData = this.tex.getContext().createImageData(this.w, this.h);
-    this.renderAccumMs = 34;
+    this.stage = 1;
+    this.sprite = null;
+    this.veil = scene.add.rectangle(360, 640, 720, 1280, 0x070a18, 0.28).setDepth(1.1);
+    this.#bindTexture(1);
   }
 
-  render(session, dtMs) {
-    const dtSec = dtMs / 1000;
-    const speedFactor = session.activeForm === "pulse" ? 1.45 : session.activeForm === "heavy" ? 1.0 : 1.2;
-    const overloadBoost = session.core.overloadActive ? 2.8 : 1.0;
-    const dashBoost = (session.warpDashMs || 0) > 0 ? 3.8 : 1.0;
-    this.scrollZ += dtSec * 4.8 * speedFactor * overloadBoost * dashBoost;
+  #ensureSeamlessTexture(key) {
+    const seamlessKey = `${key}-seamless`;
+    if (this.scene.textures.exists(seamlessKey)) return seamlessKey;
+    const src = this.scene.textures.get(key).getSourceImage();
+    const w = src.width;
+    const h = src.height;
+    const tex = this.scene.textures.createCanvas(seamlessKey, w, h * 2);
+    const ctx = tex.getContext();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, 0, 0);
+    ctx.save();
+    ctx.translate(0, h * 2);
+    ctx.scale(1, -1);
+    ctx.drawImage(src, 0, 0);
+    ctx.restore();
+    tex.refresh();
+    tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    return seamlessKey;
+  }
 
-    // Throttle software pixel-buffer upload to ~30fps to prevent GPU/CPU stalls on long runs
-    this.renderAccumMs += dtMs;
-    if (this.renderAccumMs < 32) return;
-    this.renderAccumMs = 0;
-
-    const ctx = this.tex.getContext();
-    const w = this.w;
-    const h = this.h;
-    const cx = w * 0.5;
-    const focal = 68;
-    const camHeight = 28;
-    const overloadScale = session.core.overloadActive ? 2.6 : 1.0;
-    const camTiltX = ((session.ship.x - 360) / 360) * 2.4 * overloadScale;
-
-    const formAccent =
-      session.core.overloadActive
-        ? [255, 140, 58]
-        : session.activeForm === "heavy"
-          ? [255, 140, 58]
-          : session.activeForm === "magnet"
-            ? [176, 124, 255]
-            : [67, 207, 244];
-
-    const imgData = this.imgData;
-    const data = imgData.data;
-
-    // Deep-space cosmic void with diagonal pixel-dithered nebula ribbon (no giant flat circles!)
-    for (let y = 0; y < h; y += 1) {
-      for (let x = 0; x < w; x += 1) {
-        const diag = (x * 0.65 + y * 0.9 - 120) / 68;
-        const ribbon = Math.max(0, 1 - Math.abs(diag) * 0.85);
-        // 2x2 Bayer-style pixel dither for crisp retro pixel nebula texture
-        const dither = ((x & 1) ^ (y & 1)) * 0.18 + ((x & 2) ? 0.08 : 0);
-        const neb = Math.max(0, ribbon - dither) * 0.55;
-
-        const idx = (y * w + x) * 4;
-        data[idx] = Math.round(4 + neb * formAccent[0] * 0.14);
-        data[idx + 1] = Math.round(7 + neb * (formAccent[1] * 0.12 + 8));
-        data[idx + 2] = Math.round(14 + neb * (formAccent[2] * 0.16 + 18));
-        data[idx + 3] = 255;
-      }
+  #bindTexture(stage) {
+    const key = STAGE_BG_KEYS[stage] ?? STAGE_BG_KEYS[1];
+    if (!this.scene.textures.exists(key)) return;
+    const src = this.scene.textures.get(key).getSourceImage();
+    const scale = 720 / src.width;
+    const seamlessKey = this.#ensureSeamlessTexture(key);
+    if (!this.sprite) {
+      this.sprite = this.scene.add.tileSprite(360, 640, 720, 1280, seamlessKey)
+        .setTileScale(scale, scale)
+        .setDepth(0.5);
+    } else if (this.sprite.texture.key !== seamlessKey) {
+      this.sprite.setTexture(seamlessKey).setTileScale(scale, scale);
     }
+  }
 
-    // Subtle 3D perspective tactical waypoint dots (replaces jagged road lines & cone wedges)
-    for (let y = this.horizonY + 4; y < h; y += 1) {
-      const row = y + 0.5 - this.horizonY;
-      const depth = (camHeight * focal) / row;
-      const gz = depth * 0.24 + this.scrollZ;
-      const zCell = gz - Math.floor(gz);
-      if (zCell > 0.09) continue;
-
-      const fog = Math.max(0.1, Math.min(0.85, 1 - depth / 190));
-      for (const latTarget of [-21.5, -7.2, 7.2, 21.5]) {
-        const screenXf = cx + ((latTarget - camTiltX) * focal) / depth;
-        const sx = Math.round(screenXf);
-        if (sx < 1 || sx >= w - 1) continue;
-        const idx = (y * w + sx) * 4;
-        data[idx] = Math.min(255, Math.round(data[idx] + formAccent[0] * 0.42 * fog));
-        data[idx + 1] = Math.min(255, Math.round(data[idx + 1] + formAccent[1] * 0.42 * fog));
-        data[idx + 2] = Math.min(255, Math.round(data[idx + 2] + formAccent[2] * 0.42 * fog));
-      }
+  render({ ship, overload, warpDashMs, stage = 1 }, dtMs) {
+    if (this.stage !== stage) {
+      this.stage = stage;
+      this.#bindTexture(stage);
     }
-
-    ctx.putImageData(imgData, 0, 0);
-    this.tex.refresh();
+    if (!this.sprite) return;
+    const boost = warpDashMs > 0 ? 5.2 : overload ? 2.1 : 1;
+    const pxPerMs = (0.085 * boost) / this.sprite.tileScaleY;
+    this.sprite.tilePositionY -= dtMs * pxPerMs;
+    this.sprite.tilePositionX = ((ship.x - 360) * 0.05) / this.sprite.tileScaleX;
+    this.veil.setFillStyle(overload ? 0x0b0618 : 0x070a18, overload ? 0.42 : 0.28);
   }
 
   destroy() {
-    this.sprite.destroy();
+    this.sprite?.destroy();
+    this.veil.destroy();
   }
 }

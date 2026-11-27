@@ -1,34 +1,1191 @@
 :root {
   color-scheme: dark;
-  --bg-deep: #05090b;
-  --text-primary: #d9e5f2;
-  --text-muted: #93a7bd;
-  --accent-core: #43cff4;
-  --accent-overload: #ff8c3a;
-  --accent-drone: #b07cff;
-  --accent-danger: #ff4b5c;
+  --steel-hi: #485d7c;
+  --steel-mid: #1e293d;
+  --steel-lo: #0d1322;
+  --well: #060912;
+  --edge: #7ea3d6;
+  --white: #ffffff;
+  --muted: #a6b7d6;
+  --cyan: #38e4d4;
+  --hp-green: #2ee68b;
+  --shield-blue: #3aa8ff;
+  --gold: #ffd447;
+  --orange: #ff8b2c;
+  --red: #ff3552;
+  --accent: var(--cyan);
+  --bevel: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 8px);
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: #04060e;
+  color: var(--white);
 }
 
-* {
-  box-sizing: border-box;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
-html,
-body,
-#game {
+body {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100dvh;
   margin: 0;
-  padding: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  background: radial-gradient(circle at 50% 42%, #131c36 0%, #04060e 80%);
+}
+
+#solo-shell {
+  position: relative;
+  width: min(100vw, 56.25dvh);
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  background: var(--well);
+  box-shadow: 0 0 0 2px #293852, 0 24px 64px rgba(0, 0, 0, 0.8);
+  container-type: inline-size;
+}
+#game, #solo-ui { position: absolute; inset: 0; }
+#game canvas { display: block; image-rendering: pixelated; touch-action: none; }
+#solo-ui { pointer-events: none; }
+#solo-ui :is(p, h1, h2) { margin: 0; }
+
+#solo-ui button {
+  position: relative;
+  border: 0;
+  font: inherit;
+  color: var(--white);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 100ms ease, filter 120ms ease;
+}
+#solo-ui button:active:not(:disabled) { transform: translateY(2px); }
+#solo-ui button:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+/* ── Animations ────────────────────────────────────────────── */
+@keyframes spin-cw { to { transform: rotate(360deg); } }
+@keyframes spin-ccw { to { transform: rotate(-360deg); } }
+@keyframes ship-hover {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+@keyframes ship-pop {
+  0% { transform: scale(0.76) translateY(8px); filter: brightness(2); }
+  100% { transform: scale(1) translateY(0); filter: brightness(1); }
+}
+@keyframes sheen-sweep {
+  0% { transform: translateX(-140%) skewX(-24deg); }
+  45%, 100% { transform: translateX(260%) skewX(-24deg); }
+}
+@keyframes combo-pop {
+  0% { transform: scale(1.35); filter: brightness(1.6); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+@keyframes card-deal {
+  0% { opacity: 0; transform: translateY(16px) scale(0.95); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes comms-in {
+  0% { opacity: 0; transform: translateX(22px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+@keyframes od-ready {
+  0%, 100% { box-shadow: 0 0 0 2px var(--gold), 0 0 14px rgba(255, 212, 71, 0.55); }
+  50% { box-shadow: 0 0 0 3px var(--white), 0 0 28px rgba(255, 53, 82, 0.9); }
+}
+
+/* ── Sculpted Metallic Hangar Menu ─────────────────────────── */
+.solo-menu {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  gap: 1.5cqw;
+  position: absolute;
+  inset: 0;
+  padding: 3.6cqw 4.2cqw 3.4cqw;
+  background: linear-gradient(180deg, rgba(8, 12, 24, 0.86) 0%, rgba(8, 12, 24, 0.14) 40%, rgba(8, 12, 24, 0.92) 100%);
+}
+.solo-brand-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2cqw;
+}
+.solo-brand-actions {
+  display: flex;
+  align-items: center;
+  gap: 1.2cqw;
+}
+#solo-ui .solo-medals-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 1cqw;
+  min-height: 6.8cqw;
+  padding: 0.8cqw 1.8cqw;
+  background: linear-gradient(180deg, #322b20, #171412);
+  border-top: 1px solid var(--gold);
+  box-shadow: inset 0 0 0 1px #5c4820;
+  clip-path: var(--bevel);
+  font-size: 2.25cqw;
+  font-weight: 900;
+  color: var(--gold);
+}
+#solo-ui .solo-medals-btn .solo-px-svg { width: 3.1cqw; height: 3.1cqw; }
+.solo-wordmark {
+  padding: 0.65cqw 1.8cqw;
+  background: linear-gradient(180deg, var(--steel-mid), var(--steel-lo));
+  border-top: 1px solid var(--edge);
+  border-left: 3px solid var(--accent);
+  color: var(--cyan);
+  font: 900 2.4cqw / 1 ui-monospace, monospace;
+  letter-spacing: 0.16em;
+}
+.solo-brand h1 {
+  margin-top: 0.7cqw;
+  font-size: 8.8cqw;
+  font-weight: 950;
+  line-height: 1.06;
+  letter-spacing: 0.08em;
+  text-shadow: 0 3px 0 #0a0f1c, 0 0 18px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+.solo-mode-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.8cqw;
+  margin-top: 1.2cqw;
+}
+.solo-seg {
+  display: flex;
+  padding: 2px;
+  background: var(--well);
+  border: 1.5px solid var(--steel-hi);
+  clip-path: var(--bevel);
+}
+.solo-seg button {
+  padding: 0.85cqw 2.1cqw;
+  background: transparent;
+  font-size: 2.55cqw;
+  font-weight: 850;
+  color: var(--muted);
+}
+.solo-seg button[aria-pressed="true"] {
+  background: linear-gradient(180deg, #354c72, #1c2a44);
+  color: var(--gold);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.solo-preview { display: grid; place-items: center; position: relative; min-height: 0; }
+.solo-preview-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 60cqw;
+  height: 100%;
+}
+.solo-preview-glow {
+  position: absolute;
+  width: 44cqw;
+  height: 44cqw;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 40%, transparent) 0%, transparent 66%);
+}
+.solo-ring { position: absolute; border-radius: 50%; pointer-events: none; }
+.solo-ring-outer {
+  width: 46cqw;
+  height: 46cqw;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 48%, transparent);
+  animation: spin-cw 18s linear infinite;
+}
+.solo-ring-inner {
+  width: 34cqw;
+  height: 34cqw;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  border-bottom-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: spin-ccw 9s linear infinite;
+}
+.solo-reticle {
+  position: absolute;
+  inset: 4% 6%;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 2px 16px no-repeat;
+  opacity: 0.75;
+}
+.solo-preview-ship {
+  position: relative;
+  width: 42cqw;
+  height: 78%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  animation: ship-hover 2.4s ease-in-out infinite;
+  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.85));
+}
+.solo-preview-ship.switch-pop {
+  animation: ship-pop 240ms ease-out, ship-hover 2.4s ease-in-out 240ms infinite;
+}
+
+/* ── Pilot Story Card in Hangar ────────────────────────────── */
+.solo-pilot-card {
+  display: grid;
+  grid-template-columns: 18cqw 1fr;
+  gap: 2.2cqw;
+  align-items: center;
+  padding: 1.8cqw 2.2cqw;
+  background: linear-gradient(180deg, var(--steel-mid) 0%, var(--steel-lo) 100%);
+  border-top: 1.5px solid var(--edge);
+  border-bottom: 2px solid #060912;
+  box-shadow: inset 0 0 0 1px #2a3b58, 0 8px 20px rgba(0, 0, 0, 0.55);
+  clip-path: var(--bevel);
+}
+.solo-pilot-frame {
+  width: 18cqw;
+  height: 18cqw;
+  padding: 2px;
+  background: var(--well);
+  border: 2px solid var(--accent);
+}
+.solo-pilot-img {
   width: 100%;
   height: 100%;
-  overflow: hidden;
-  background: var(--bg-deep);
-  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  touch-action: none;
-}
-
-#game canvas {
+  object-fit: cover;
+  image-rendering: pixelated;
   display: block;
 }
+.solo-caption-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5cqw;
+}
+.solo-callsign {
+  display: block;
+  color: var(--cyan);
+  font: 900 2.15cqw ui-monospace, "PingFang SC", monospace;
+  letter-spacing: 0.08em;
+}
+.solo-pilot-info strong { display: block; font-size: 3.3cqw; margin-top: 0.2cqw; }
+.solo-pilot-bio {
+  margin-top: 0.5cqw;
+  color: var(--muted);
+  font-size: 2.25cqw;
+  line-height: 1.35;
+}
+.solo-overload-tag {
+  flex-shrink: 0;
+  padding: 0.65cqw 1.4cqw;
+  background: rgba(255, 212, 71, 0.14);
+  border: 1.5px solid var(--gold);
+  font-size: 2.2cqw;
+  font-weight: 850;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.solo-stat-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.8cqw;
+  margin-top: 1.1cqw;
+}
+.solo-stat-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.9cqw;
+  font: 800 2.1cqw ui-monospace, "PingFang SC", sans-serif;
+  color: var(--muted);
+}
+.solo-stat-row i {
+  flex: 1;
+  position: relative;
+  display: block;
+  height: 5px;
+  background: var(--well);
+  border: 1px solid #2b3d5c;
+}
+.solo-stat-row i::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--val, 50%);
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.solo-fighter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.4cqw; }
+#solo-ui .solo-fighter-grid button {
+  display: flex;
+  align-items: center;
+  gap: 1.2cqw;
+  min-height: 9.2cqw;
+  padding: 0.9cqw 1.4cqw;
+  font-size: 2.95cqw;
+  font-weight: 850;
+  background: linear-gradient(180deg, #1b2538, #0f1626);
+  border-top: 1px solid #3c5073;
+  box-shadow: inset 0 0 0 1px #25334c;
+  clip-path: var(--bevel);
+}
+.solo-fighter-grid img { width: 6.8cqw; height: 6.8cqw; object-fit: contain; image-rendering: pixelated; flex-shrink: 0; }
+#solo-ui .solo-fighter-grid button[aria-pressed="true"] {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--tile-accent) 26%, #24334d), #121a2d);
+  border-top-color: var(--white);
+  box-shadow: inset 0 0 0 2px var(--tile-accent), 0 0 14px color-mix(in srgb, var(--tile-accent) 45%, transparent);
+}
+#solo-ui .solo-fighter-grid button[aria-pressed="true"] span { color: var(--tile-accent); }
+
+#solo-ui button.solo-primary {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 10.6cqw;
+  padding: 1.3cqw 3.8cqw;
+  background: linear-gradient(180deg, #ffd858 0%, #e69516 100%);
+  border-top: 2px solid #fff2b2;
+  box-shadow: 0 4px 0 #7a4206, 0 8px 20px rgba(0, 0, 0, 0.5);
+  clip-path: var(--bevel);
+  color: #1a0d02;
+  font-size: 4.1cqw;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+}
+#solo-ui button.solo-primary::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: sheen-sweep 3s ease-in-out infinite;
+}
+.solo-launch-arrow {
+  display: grid;
+  place-items: center;
+  width: 5.6cqw;
+  height: 5.6cqw;
+  background: #1a0d02;
+  color: var(--gold);
+  font-size: 2.8cqw;
+  clip-path: var(--bevel);
+}
+
+/* ── Sculpted Metallic Battle Cockpit HUD ──────────────────── */
+#solo-ui :is(.solo-sound, .solo-pause) {
+  width: 8.6cqw;
+  min-height: 6.8cqw;
+  background: linear-gradient(180deg, #273754, #121a2d);
+  border-top: 1px solid var(--edge);
+  box-shadow: inset 0 0 0 1px #32466a;
+  clip-path: var(--bevel);
+  font-size: 2.35cqw;
+  font-weight: 850;
+  color: var(--cyan);
+}
+#solo-ui .solo-pause { font-size: 3cqw; }
+#solo-ui .solo-sound[aria-pressed="true"] { color: var(--red); border-top-color: var(--red); }
+
+.solo-flight { position: absolute; inset: 0; }
+.solo-telemetry {
+  position: absolute;
+  inset: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: start;
+  gap: 1.4cqw;
+  padding: 1.8cqw 2cqw 2.4cqw;
+  background: linear-gradient(180deg, #1b253bf0 0%, #0d1424e0 72%, rgba(8, 12, 24, 0) 100%);
+  border-bottom: 1.5px solid #3b5075;
+}
+.solo-meters-col { display: grid; gap: 0.7cqw; }
+.solo-hp-row { display: flex; align-items: center; gap: 1cqw; }
+.solo-tag {
+  font: 950 2.3cqw ui-monospace, monospace;
+  color: var(--cyan);
+  text-shadow: 0 1px 2px #000;
+}
+.solo-hp-segs {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 2px;
+  padding: 2px;
+  height: max(10px, 2.2cqw);
+  background: var(--well);
+  border: 1px solid var(--steel-hi);
+}
+.solo-hp-segs i { background: #141c2f; display: block; }
+.solo-hp-segs i.on {
+  background: linear-gradient(180deg, #7cffb2 0%, var(--hp-green) 60%, #159457 100%);
+  box-shadow: 0 0 4px rgba(46, 230, 139, 0.5);
+}
+.solo-hp-num { font: 850 2.1cqw ui-monospace, monospace; color: var(--white); }
+
+.solo-sub-bars { display: flex; align-items: center; gap: 1cqw; }
+.solo-meter {
+  flex: 1;
+  height: max(6px, 1.3cqw);
+  background: var(--well);
+  border: 1px solid var(--steel-hi);
+  padding: 1px;
+  overflow: hidden;
+}
+.solo-meter i { display: block; height: 100%; transform-origin: left; transition: transform 90ms linear; }
+.solo-shield i { background: linear-gradient(90deg, #1e73cc, var(--shield-blue), #9de2ff); }
+.solo-xp i { background: linear-gradient(90deg, #c75a0a, var(--orange), var(--gold)); }
+.solo-lv-tag { font: 900 2.15cqw ui-monospace, monospace; color: var(--gold); }
+
+.solo-stage {
+  display: grid;
+  place-items: center;
+  min-width: 15cqw;
+  padding: 0.7cqw 1.8cqw;
+  background: linear-gradient(180deg, #2d3e5e, #121a2d);
+  border: 1.5px solid var(--edge);
+  clip-path: var(--bevel);
+  text-align: center;
+}
+.solo-stage span { font: 950 2.35cqw ui-monospace, monospace; color: var(--gold); line-height: 1.1; }
+.solo-stage b { font: 850 2cqw ui-monospace, monospace; color: var(--muted); }
+
+.solo-right-col { display: grid; justify-items: end; gap: 0.8cqw; }
+.solo-score-row { display: flex; align-items: center; gap: 1cqw; }
+.solo-score {
+  font: 950 2.75cqw ui-monospace, monospace;
+  color: var(--white);
+  letter-spacing: 0.04em;
+  text-shadow: 0 2px 0 #070b15;
+}
+.solo-combo {
+  padding: 0.45cqw 1.4cqw;
+  background: linear-gradient(90deg, rgba(255, 139, 44, 0.25), rgba(255, 212, 71, 0.35));
+  border-right: 3px solid var(--gold);
+  font: 950 2.85cqw ui-monospace, monospace;
+  color: var(--gold);
+  text-shadow: 0 2px 0 #1a0c02;
+}
+.solo-combo.pop { animation: combo-pop 160ms ease-out; }
+
+.solo-status-strip {
+  position: absolute;
+  top: 9.8cqw;
+  left: 2cqw;
+  display: flex;
+  align-items: center;
+  gap: 1.2cqw;
+}
+.solo-breach {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.9cqw;
+  padding: 0.45cqw 1.2cqw;
+  background: rgba(24, 8, 14, 0.9);
+  border: 1px solid var(--red);
+  clip-path: var(--bevel);
+  font: 900 1.95cqw ui-monospace, "PingFang SC", monospace;
+  color: var(--red);
+}
+.solo-breach-pips { display: inline-flex; gap: 3px; }
+.solo-breach-pips i {
+  display: block;
+  width: 1.3cqw;
+  height: 1.3cqw;
+  background: #2b131d;
+  border: 1px solid #050811;
+}
+.solo-breach-pips i.on {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red);
+}
+.solo-mutator, .solo-fever-tag {
+  padding: 0.45cqw 1.2cqw;
+  background: rgba(13, 19, 34, 0.9);
+  border-left: 3px solid var(--gold);
+  font: 900 1.95cqw ui-monospace, "PingFang SC", monospace;
+  color: var(--gold);
+}
+.solo-fever-tag { border-color: var(--cyan); color: var(--cyan); }
+
+.solo-ach-toast {
+  position: absolute;
+  top: 13.6cqw;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1.8cqw;
+  min-width: 62%;
+  padding: 1.2cqw 2cqw;
+  background: linear-gradient(180deg, #2d2415f2, #120f0af5);
+  border: 1.5px solid var(--gold);
+  box-shadow: 0 4px 0 #050811, 0 10px 24px rgba(0, 0, 0, 0.8);
+  clip-path: var(--bevel);
+}
+.solo-ach-toast[data-tier="cyan"] { border-color: var(--cyan); }
+.solo-ach-toast[data-tier="crimson"] { border-color: var(--red); }
+.solo-ach-toast .solo-ach-icon { width: 5.4cqw; height: 5.4cqw; flex-shrink: 0; }
+.solo-ach-toast .solo-px-svg { width: 100%; height: 100%; }
+.solo-ach-toast em { display: block; font: 900 1.8cqw ui-monospace, monospace; font-style: normal; color: var(--gold); }
+.solo-ach-toast strong { display: block; font-size: 2.75cqw; color: var(--white); }
+.solo-ach-toast small { display: block; font-size: 2.1cqw; color: var(--muted); }
+
+.solo-medal-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2cqw;
+}
+.solo-medal-summary span { font: 850 2.35cqw ui-monospace, "PingFang SC", monospace; color: var(--cyan); }
+.solo-medal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.4cqw;
+  margin-top: 2cqw;
+  max-height: 82cqw;
+  overflow-y: auto;
+  padding-right: 0.4cqw;
+}
+.solo-medal-card {
+  display: flex;
+  align-items: center;
+  gap: 1.4cqw;
+  padding: 1.3cqw 1.4cqw;
+  background: #080c18;
+  border: 1px solid #26344f;
+  clip-path: var(--bevel);
+  opacity: 0.56;
+}
+.solo-medal-card[data-unlocked="true"] {
+  opacity: 1;
+  background: linear-gradient(180deg, #25201a, #121116);
+  border-color: var(--gold);
+}
+.solo-medal-card[data-unlocked="true"][data-tier="cyan"] {
+  background: linear-gradient(180deg, #172d3d, #0e1624);
+  border-color: var(--cyan);
+}
+.solo-medal-card[data-unlocked="true"][data-tier="crimson"] {
+  background: linear-gradient(180deg, #361722, #150b12);
+  border-color: var(--red);
+}
+.solo-medal-icon {
+  display: grid;
+  place-items: center;
+  width: 6.4cqw;
+  height: 6.4cqw;
+  flex-shrink: 0;
+  background: #050811;
+  border: 1px solid #2d3e5e;
+  color: #5b6e91;
+}
+.solo-medal-icon .solo-px-svg { width: 4.4cqw; height: 4.4cqw; }
+.solo-medal-card strong { display: block; font-size: 2.55cqw; color: var(--white); }
+.solo-medal-card small { display: block; margin-top: 0.25cqw; font-size: 2cqw; line-height: 1.25; color: var(--muted); }
+
+.solo-boss-status {
+  position: absolute;
+  top: 13.4cqw;
+  left: 2cqw;
+  width: min(68%, 64cqw);
+  display: grid;
+  grid-template-columns: 1fr 1.15fr 1fr;
+  gap: 1.4cqw;
+  padding: 1.3cqw 1.7cqw;
+  background: linear-gradient(180deg, #261420ee, #130a12ee);
+  border-top: 1px solid var(--red);
+  clip-path: var(--bevel);
+}
+.solo-boss-status span { display: block; margin-bottom: 0.35cqw; font-size: 2.2cqw; font-weight: 850; white-space: nowrap; }
+.solo-boss-status [data-part] div { height: 6px; background: var(--well); border: 1px solid #592635; padding: 1px; }
+.solo-boss-status i { display: block; height: 100%; transform-origin: left; background: var(--gold); }
+.solo-boss-status [data-part="core"] i { background: var(--red); }
+
+/* ── Bottom Dock: Circular Overdrive + Pilot Comms Strip ───── */
+.solo-loadout {
+  position: absolute;
+  bottom: 20.5cqw;
+  left: 2.6cqw;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9cqw;
+  max-width: 72%;
+}
+.solo-loadout span {
+  padding: 0.45cqw 1.2cqw;
+  background: rgba(13, 19, 34, 0.9);
+  border-left: 2.5px solid var(--steel-hi);
+  font: 850 2.1cqw ui-monospace, "PingFang SC", sans-serif;
+  color: var(--muted);
+}
+.solo-loadout span.sec { border-color: var(--cyan); color: var(--white); }
+.solo-loadout span.syn { border-color: var(--gold); color: var(--gold); background: rgba(34, 24, 10, 0.92); }
+
+.solo-bottom-dock {
+  position: absolute;
+  inset: auto 2.4cqw 2.4cqw;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2cqw;
+}
+#solo-ui .solo-overload {
+  --charge: 0%;
+  position: relative;
+  width: 16.5cqw;
+  height: 16.5cqw;
+  flex-shrink: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: radial-gradient(circle, #381822 0%, #12182b 74%);
+  box-shadow: 0 0 0 2px var(--steel-hi), 0 8px 18px rgba(0, 0, 0, 0.7);
+}
+.solo-od-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(var(--gold) 0% var(--charge), #25334e var(--charge) 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+}
+.solo-od-core {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 0.2cqw;
+  text-align: center;
+}
+.solo-od-core strong { font: 950 1.85cqw ui-monospace, monospace; color: var(--gold); letter-spacing: 0.04em; }
+.solo-od-core b { font: 950 3cqw ui-monospace, monospace; color: var(--white); }
+#solo-ui .solo-overload:disabled { cursor: default; pointer-events: none; opacity: 0.9; }
+#solo-ui .solo-overload:enabled {
+  background: radial-gradient(circle, #ff3552 0%, #99132b 70%, #3d0914 100%);
+  animation: od-ready 1s ease-in-out infinite;
+}
+#solo-ui .solo-overload:enabled strong { color: #fff2b2; }
+
+.solo-comms {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 1.8cqw;
+  padding: 1.3cqw 1.8cqw;
+  background: linear-gradient(180deg, rgba(25, 36, 58, 0.94), rgba(10, 15, 28, 0.96));
+  border-top: 1.5px solid var(--cyan);
+  box-shadow: inset 0 0 0 1px #2f4366, 0 8px 20px rgba(0, 0, 0, 0.7);
+  clip-path: var(--bevel);
+}
+.solo-comms.show { animation: comms-in 220ms ease-out; }
+.solo-comms-img {
+  width: 11.5cqw;
+  height: 11.5cqw;
+  border: 1.5px solid var(--cyan);
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+.solo-comms-speaker {
+  display: block;
+  font: 900 2.25cqw ui-monospace, "PingFang SC", monospace;
+  font-style: normal;
+  color: var(--cyan);
+}
+.solo-comms-line {
+  margin-top: 0.35cqw;
+  font-size: 2.45cqw;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--white);
+}
+
+/* ── Banners & Modals ──────────────────────────────────────── */
+.solo-announcement, .solo-boss-alert, .solo-beam-warning {
+  position: absolute;
+  top: 20%;
+  left: 50%;
+  width: 88%;
+  transform: translateX(-50%);
+  padding: 1.3cqw 3.6cqw;
+  background: linear-gradient(90deg, rgba(13, 19, 34, 0.94), rgba(26, 38, 66, 0.94), rgba(13, 19, 34, 0.94));
+  border-top: 2px solid var(--cyan);
+  border-bottom: 2px solid var(--cyan);
+  clip-path: var(--bevel);
+  font-size: 3.1cqw;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-align: center;
+  color: var(--cyan);
+}
+.solo-announcement { opacity: 0; }
+.solo-announcement.show { opacity: 1; }
+.solo-announcement[data-variant="danger"], .solo-boss-alert { border-color: var(--red); background: rgba(34, 8, 18, 0.94); color: var(--white); }
+.solo-announcement[data-variant="evolution"], .solo-beam-warning { border-color: var(--gold); background: rgba(34, 24, 8, 0.94); color: var(--gold); }
+.solo-boss-alert { top: 34%; }
+.solo-beam-warning { top: 27%; }
+
+@keyframes res-pulse {
+  0%, 100% { box-shadow: 0 4px 0 #050811, inset 0 0 0 1.5px #ff5ce1, 0 0 12px rgba(255, 92, 225, 0.35); }
+  50% { box-shadow: 0 4px 0 #050811, inset 0 0 0 1.5px #ffd447, 0 0 22px rgba(255, 212, 71, 0.55); }
+}
+@keyframes pip-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+
+.solo-dialog-wrap {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 3cqw;
+  background:
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.24) 0 2px, transparent 2px 4px),
+    radial-gradient(circle at 50% 45%, rgba(11, 17, 34, 0.78) 0%, rgba(3, 5, 12, 0.92) 100%);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+.solo-dialog {
+  --dlg-accent: var(--gold);
+  position: relative;
+  width: 94%;
+  max-height: 94%;
+  overflow-y: auto;
+  padding: 0 3.6cqw 3.4cqw;
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0 2px, transparent 2px 4px),
+    linear-gradient(180deg, #1b2740 0%, #0d1424 55%, #090e1a 100%);
+  border: 2px solid #050811;
+  box-shadow:
+    inset 0 0 0 2px #3c527a,
+    inset 0 2px 0 2px rgba(173, 206, 255, 0.16),
+    0 10px 0 #050811,
+    0 24px 60px rgba(0, 0, 0, 0.92);
+  clip-path: var(--bevel);
+}
+.solo-dialog[data-kind="defeat"] { --dlg-accent: var(--red); }
+.solo-dialog[data-kind="victory"] { --dlg-accent: var(--cyan); }
+
+.solo-dialog-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2cqw;
+  margin: 0 -3.6cqw 2.4cqw;
+  padding: 1.5cqw 3.6cqw;
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(0, 0, 0, 0.34) 0 6px,
+      rgba(255, 212, 71, 0.08) 6px 12px
+    ),
+    linear-gradient(180deg, #273756, #141d31);
+  border-bottom: 2px solid var(--dlg-accent);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+}
+.solo-dialog[data-kind="defeat"] .solo-dialog-bar {
+  background:
+    repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.38) 0 6px, rgba(255, 53, 82, 0.16) 6px 12px),
+    linear-gradient(180deg, #3a1622, #190b12);
+}
+.solo-bar-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.2cqw;
+  font: 950 2.35cqw ui-monospace, monospace;
+  letter-spacing: 0.1em;
+  color: var(--dlg-accent);
+}
+.solo-bar-meta {
+  padding: 0.45cqw 1.3cqw;
+  background: #060912;
+  border: 1px solid #3c527a;
+  font: 900 2.2cqw ui-monospace, monospace;
+  color: var(--white);
+}
+.solo-led {
+  display: inline-block;
+  width: 1.7cqw;
+  height: 1.7cqw;
+  background: #3d4a63;
+  border: 1px solid #050811;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.solo-led.on { background: var(--hp-green); box-shadow: 0 0 8px var(--hp-green); }
+.solo-led.pause { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
+.solo-led.off { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+.solo-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 2.4cqw;
+}
+.solo-dialog-pilot {
+  width: 12.6cqw;
+  height: 12.6cqw;
+  flex-shrink: 0;
+  object-fit: cover;
+  image-rendering: pixelated;
+  background: #060912;
+  border: 2px solid var(--dlg-accent);
+  box-shadow: inset 0 0 0 1px #060912, 0 3px 0 #050811;
+}
+.solo-dialog-kicker {
+  color: var(--dlg-accent);
+  font: 900 2.35cqw ui-monospace, "PingFang SC", monospace;
+  letter-spacing: 0.1em;
+}
+.solo-dialog h2 {
+  margin-top: 0.4cqw;
+  font-size: 5.4cqw;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  text-shadow: 0 3px 0 #050811;
+}
+
+.solo-upgrades {
+  display: grid;
+  gap: 1.8cqw;
+  margin-top: 2.4cqw;
+}
+#solo-ui .solo-upgrades button {
+  --card-accent: var(--edge);
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 14.5cqw minmax(0, 1fr) 8.6cqw;
+  align-items: center;
+  gap: 2cqw;
+  min-height: 15.2cqw;
+  padding: 1.7cqw 1.8cqw;
+  background: linear-gradient(180deg, #253452 0%, #131c30 100%);
+  border: 1.5px solid #050811;
+  border-left: 5px solid var(--card-accent);
+  box-shadow:
+    0 4px 0 #050811,
+    inset 0 0 0 1px color-mix(in srgb, var(--card-accent) 42%, #1d2942);
+  clip-path: var(--bevel);
+  text-align: left;
+  animation: card-deal 220ms ease-out calc(var(--deal-i, 0) * 60ms) both;
+}
+#solo-ui .solo-upgrades button::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 28%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+  transform: translateX(-160%) skewX(-22deg);
+  pointer-events: none;
+}
+#solo-ui .solo-upgrades button:hover,
+#solo-ui .solo-upgrades button:focus-visible {
+  transform: translateY(-2px);
+  filter: brightness(1.1);
+  box-shadow:
+    0 6px 0 #050811,
+    inset 0 0 0 1.5px var(--card-accent),
+    0 0 16px color-mix(in srgb, var(--card-accent) 32%, transparent);
+}
+#solo-ui .solo-upgrades button:hover::after {
+  animation: sheen-sweep 700ms ease-out;
+}
+#solo-ui .solo-upgrades button:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #050811, inset 0 0 0 1.5px var(--card-accent);
+}
+#solo-ui .solo-upgrades [data-card="专属"] {
+  --card-accent: var(--gold);
+  background: linear-gradient(180deg, #322b20 0%, #18161a 100%);
+}
+#solo-ui .solo-upgrades [data-card="副武"] {
+  --card-accent: var(--cyan);
+  background: linear-gradient(180deg, #1b3446 0%, #101b2a 100%);
+}
+#solo-ui .solo-upgrades [data-card="通用"] {
+  --card-accent: #7ea3d6;
+}
+#solo-ui .solo-upgrades [data-resonance="true"] {
+  --card-accent: #ff5ce1;
+  background: linear-gradient(180deg, #371c43 0%, #17122a 100%);
+  animation: card-deal 220ms ease-out calc(var(--deal-i, 0) * 60ms) both, res-pulse 1.6s ease-in-out infinite;
+}
+
+.solo-card-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 14.5cqw;
+  height: 14.5cqw;
+  background:
+    radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--card-accent) 22%, #0c1324), #060912 75%);
+  border: 1.5px solid color-mix(in srgb, var(--card-accent) 60%, #24334d);
+  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.85);
+}
+.solo-px-svg {
+  width: 9.2cqw;
+  height: 9.2cqw;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 2px 0 #050811);
+}
+.solo-card-ship {
+  width: 10.6cqw;
+  height: 10.6cqw;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 2px 0 #050811);
+}
+.solo-card-lv {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 0.25cqw 0.8cqw;
+  background: var(--card-accent);
+  color: #060912;
+  font: 950 1.85cqw / 1.1 ui-monospace, monospace;
+}
+
+.solo-card-body { min-width: 0; }
+.solo-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 1.4cqw;
+}
+.solo-card-tag {
+  padding: 0.2cqw 0.9cqw;
+  background: rgba(6, 9, 18, 0.78);
+  border: 1px solid color-mix(in srgb, var(--card-accent) 60%, transparent);
+  font-style: normal;
+  font-size: 2cqw;
+  font-weight: 900;
+  color: var(--card-accent);
+}
+.solo-pips {
+  display: inline-flex;
+  gap: 3px;
+}
+.solo-pips i {
+  display: block;
+  width: 1.35cqw;
+  height: 1.35cqw;
+  background: #1b263d;
+  border: 1px solid #050811;
+}
+.solo-pips i.on {
+  background: var(--card-accent);
+}
+.solo-pips i.next {
+  background: #ffffff;
+  box-shadow: 0 0 6px var(--card-accent);
+  animation: pip-pulse 900ms ease-in-out infinite;
+}
+.solo-card-body strong {
+  display: block;
+  margin-top: 0.55cqw;
+  font-size: 3.55cqw;
+  font-weight: 950;
+  color: var(--white);
+  text-shadow: 0 2px 0 #050811;
+}
+.solo-card-body small {
+  display: block;
+  margin-top: 0.35cqw;
+  font-size: 2.45cqw;
+  line-height: 1.32;
+  color: var(--muted);
+}
+.solo-card-res {
+  display: inline-block;
+  margin-top: 0.6cqw;
+  padding: 0.25cqw 1cqw;
+  background: rgba(255, 92, 225, 0.18);
+  border: 1px solid #ff5ce1;
+  font: 900 2.05cqw ui-monospace, "PingFang SC", sans-serif;
+  color: #ffd447;
+}
+
+.solo-card-act {
+  display: grid;
+  place-items: center;
+  gap: 0.45cqw;
+  height: 100%;
+  padding: 1cqw 0.6cqw;
+  background: rgba(6, 9, 18, 0.68);
+  border: 1px solid #2b3c5e;
+  text-align: center;
+}
+.solo-card-act kbd {
+  display: grid;
+  place-items: center;
+  width: 4.8cqw;
+  height: 4.8cqw;
+  background: #1a263f;
+  border: 1px solid var(--card-accent);
+  box-shadow: 0 2px 0 #050811;
+  font: 950 2.5cqw ui-monospace, monospace;
+  color: var(--card-accent);
+}
+.solo-card-act span {
+  font-size: 1.95cqw;
+  font-weight: 850;
+  color: var(--muted);
+}
+#solo-ui .solo-upgrades button:hover .solo-card-act kbd {
+  background: var(--card-accent);
+  color: #060912;
+}
+
+.solo-dialog-foot {
+  margin-top: 2cqw;
+  text-align: center;
+  font: 800 2.05cqw ui-monospace, "PingFang SC", monospace;
+  letter-spacing: 0.08em;
+  color: #7d92b8;
+}
+
+/* ── Pause Telemetry & Arcade Dialog Actions ───────────────── */
+.solo-pause-telemetry {
+  display: flex;
+  align-items: center;
+  gap: 2cqw;
+  margin-top: 2.2cqw;
+  padding: 1.4cqw 1.8cqw;
+  background: #060912;
+  border: 1.5px solid #2d4063;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.85);
+}
+.solo-pause-ship {
+  width: 8.6cqw;
+  height: 8.6cqw;
+  object-fit: contain;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+.solo-pause-unit {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.35cqw;
+}
+.solo-pause-unit strong {
+  font-size: 2.8cqw;
+  font-weight: 900;
+  color: var(--cyan);
+}
+.solo-pause-unit span {
+  font: 800 2.15cqw ui-monospace, "PingFang SC", monospace;
+  color: var(--muted);
+}
+.solo-pause-score {
+  text-align: right;
+  display: grid;
+  gap: 0.25cqw;
+}
+.solo-pause-score em {
+  font: 900 1.8cqw ui-monospace, monospace;
+  font-style: normal;
+  color: var(--gold);
+}
+.solo-pause-score b {
+  font: 950 3cqw ui-monospace, monospace;
+  color: var(--white);
+}
+
+.solo-dialog-actions {
+  display: grid;
+  gap: 1.6cqw;
+  margin-top: 2.4cqw;
+}
+#solo-ui .solo-arcade-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2cqw;
+  width: 100%;
+  min-height: 9.8cqw;
+  padding: 1.4cqw 2.4cqw;
+}
+#solo-ui .solo-arcade-btn .solo-btn-icon {
+  display: grid;
+  place-items: center;
+  width: 5.2cqw;
+  height: 5.2cqw;
+  flex-shrink: 0;
+}
+#solo-ui .solo-arcade-btn .solo-px-svg {
+  width: 4.4cqw;
+  height: 4.4cqw;
+}
+#solo-ui .solo-arcade-btn .solo-btn-label {
+  flex: 1;
+  text-align: left;
+}
+#solo-ui .solo-secondary {
+  background: linear-gradient(180deg, #273756 0%, #131c30 100%);
+  border: 1.5px solid #050811;
+  border-top-color: #5b78ab;
+  box-shadow: 0 4px 0 #050811, inset 0 0 0 1px #2f4368;
+  clip-path: var(--bevel);
+  font-size: 3.15cqw;
+  font-weight: 850;
+  color: var(--white);
+}
+#solo-ui .solo-secondary:hover {
+  filter: brightness(1.12);
+  border-top-color: var(--cyan);
+}
+#solo-ui .solo-secondary[aria-pressed="true"] {
+  border-top-color: var(--red);
+  color: #ffc2cb;
+}
+
+.solo-result-head { display: flex; align-items: center; justify-content: space-between; gap: 2cqw; }
+.solo-victory-quote {
+  margin-top: 2cqw;
+  padding: 1.5cqw 2cqw;
+  background: #060912;
+  border: 1px solid #3c527a;
+  border-left: 4px solid var(--gold);
+  font-size: 2.65cqw;
+  color: var(--muted);
+}
+.solo-rank-stamp {
+  display: grid;
+  place-items: center;
+  width: 13cqw;
+  height: 13cqw;
+  flex-shrink: 0;
+  font: 950 8cqw / 1 ui-monospace, monospace;
+  border: 2px solid #050811;
+  box-shadow: 0 4px 0 #050811;
+  clip-path: var(--bevel);
+  transform: rotate(-5deg);
+}
+.solo-tile-rank {
+  margin-left: auto;
+  padding: 0.3cqw 0.85cqw;
+  font: 950 2.1cqw / 1 ui-monospace, monospace;
+  font-style: normal;
+  clip-path: var(--bevel);
+}
+.solo-tile-rank.rank-S, .solo-rank-stamp.rank-S { background: var(--gold); color: var(--well); }
+.solo-tile-rank.rank-A, .solo-rank-stamp.rank-A { background: var(--cyan); color: var(--well); }
+.solo-tile-rank.rank-B, .solo-rank-stamp.rank-B { background: var(--white); color: var(--well); }
+.solo-tile-rank.rank-C, .solo-rank-stamp.rank-C { background: var(--steel-hi); color: var(--white); }
+
+.solo-results {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.4cqw;
+  margin: 2.2cqw 0 0;
+  padding: 2cqw 1.6cqw;
+  background: #060912;
+  border: 1.5px solid #2d4063;
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.85);
+  color: var(--muted);
+  font-size: 2.45cqw;
+  text-align: center;
+}
+.solo-results dd { margin: 0.5cqw 0 0; color: var(--gold); font: 900 4.4cqw ui-monospace, monospace; }
